@@ -9,15 +9,20 @@ option(TCLZMACHINE_BUILD_TESTS "Build tests" ON)
 
 find_package(TCL 8.6 REQUIRED)
 
-add_library(tclzmachine SHARED
-    src/tcl_extension.c
+set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
     src/zmachine_decode.c
     src/zmachine_exec.c
+    src/zmachine_input.c
     src/zmachine_object.c
     src/zmachine_state.c
     src/zmachine_text.c
     src/zmachine_version.c
+)
+
+add_library(tclzmachine SHARED
+    src/tcl_extension.c
+    ${TCLZMACHINE_VM_SOURCES}
 )
 
 target_include_directories(tclzmachine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
@@ -54,35 +59,30 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(object-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME object-subsystem COMMAND object-test)
 
-    add_executable(text-test
-        tests/text.c
-        src/zmachine.c
-        src/zmachine_object.c
-        src/zmachine_state.c
-        src/zmachine_text.c
-        src/zmachine_version.c)
+    add_executable(text-test tests/text.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(text-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(text-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME text-decoder COMMAND text-test)
 
-    set(TCLZMACHINE_VM_TEST_SOURCES
-        src/zmachine.c src/zmachine_decode.c src/zmachine_exec.c
-        src/zmachine_object.c src/zmachine_state.c src/zmachine_text.c src/zmachine_version.c)
-
-    add_executable(vm-exec-test tests/vm_exec.c ${TCLZMACHINE_VM_TEST_SOURCES})
+    add_executable(vm-exec-test tests/vm_exec.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(vm-exec-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(vm-exec-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME vm-exec COMMAND vm-exec-test)
 
-    add_executable(object-exec-test tests/object_exec.c ${TCLZMACHINE_VM_TEST_SOURCES})
+    add_executable(object-exec-test tests/object_exec.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(object-exec-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(object-exec-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME object-opcodes COMMAND object-exec-test)
 
-    add_executable(text-exec-test tests/text_exec.c ${TCLZMACHINE_VM_TEST_SOURCES})
+    add_executable(text-exec-test tests/text_exec.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(text-exec-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(text-exec-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME text-opcodes COMMAND text-exec-test)
+
+    add_executable(input-run-test tests/input_run.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(input-run-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(input-run-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME input-run-loop COMMAND input-run-test)
 
     add_test(NAME package-smoke COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>)
 endif()
