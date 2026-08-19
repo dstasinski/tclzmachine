@@ -1,5 +1,7 @@
 #include "tclzmachine.h"
+#include "zmachine_decode.h"
 #include "zmachine_exec.h"
+#include "zmachine_input.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,17 +27,14 @@ static int validate_header_layout(ZMachine *vm)
         set_error(vm, "invalid static-memory base in Z-machine header");
         return TCL_ERROR;
     }
-
     if ((size_t)vm->initial_pc >= vm->memory_size) {
         set_error(vm, "initial program counter is outside the story file");
         return TCL_ERROR;
     }
-
     if (vm->declared_file_length != 0 && vm->declared_file_length > vm->memory_size) {
         set_error(vm, "story file is shorter than the length declared in its header");
         return TCL_ERROR;
     }
-
     return TCL_OK;
 }
 
@@ -43,7 +42,6 @@ ZMachine *zmachine_create(void)
 {
     ZMachine *vm = (ZMachine *)calloc(1, sizeof(*vm));
     if (!vm) return NULL;
-
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
     vm->state = ZM_STATE_READY;
@@ -67,32 +65,27 @@ int zmachine_load_story(ZMachine *vm, const char *path)
     uint8_t version;
 
     if (!vm || !path) return TCL_ERROR;
-
     fp = fopen(path, "rb");
     if (!fp) {
         set_error(vm, "unable to open story file");
         return TCL_ERROR;
     }
-
     if (fseek(fp, 0, SEEK_END) != 0 || (size = ftell(fp)) < 0 || fseek(fp, 0, SEEK_SET) != 0) {
         fclose(fp);
         set_error(vm, "unable to determine story file size");
         return TCL_ERROR;
     }
-
     if (size < (long)ZM_HEADER_SIZE) {
         fclose(fp);
         set_error(vm, "story file is too small to contain a Z-machine header");
         return TCL_ERROR;
     }
-
     buf = (uint8_t *)malloc((size_t)size);
     if (!buf) {
         fclose(fp);
         set_error(vm, "out of memory while loading story file");
         return TCL_ERROR;
     }
-
     if (fread(buf, 1, (size_t)size, fp) != (size_t)size) {
         free(buf);
         fclose(fp);
@@ -138,7 +131,6 @@ int zmachine_load_story(ZMachine *vm, const char *path)
         vm->memory_size = 0;
         return TCL_ERROR;
     }
-
     return zmachine_reset(vm);
 }
 
@@ -148,7 +140,6 @@ int zmachine_reset(ZMachine *vm)
         if (vm) set_error(vm, "no story is loaded");
         return TCL_ERROR;
     }
-
     vm->pc = vm->initial_pc;
     vm->sp = 0;
     vm->frame_count = 0;
@@ -165,12 +156,62 @@ int zmachine_supply_input(ZMachine *vm, const char *line)
     if (!vm || !line) return TCL_ERROR;
     if (vm->state == ZM_STATE_HALTED || vm->state == ZM_STATE_ERROR)
         return TCL_ERROR;
-
     Tcl_DStringSetLength(&vm->pending_input, 0);
     Tcl_DStringAppend(&vm->pending_input, line, -1);
     vm->input_available = 1;
     if (vm->state == ZM_STATE_WAITING_INPUT)
         vm->state = ZM_STATE_READY;
+    return TCL_OK;
+}
+
+static int handle_read_opcode(ZMachine *vm, int *handled)
+{
+    ZMachineInstruction instruction;
+    uint16_t values[ZM_MAX_OPERANDS];
+    uint16_t terminator = 13U;
+    char decode_error[128];
+    uint32_t next_pc;
+
+    *handled = 0;
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, &instruction,
+                                     decode_error, sizeof(decode_error))) {
+        set_error(vm, decode_error[0] ? decode_error : "unable to decode Z-machine instruction");
+        return TCL_ERROR;
+    }
+
+    if (instruction.operand_count != ZM_OPERANDS_VAR || instruction.opcode_number != 4U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (!vm->input_available) {
+        vm->state = ZM_STATE_WAITING_INPUT;
+        return TCL_OK;
+    }
+
+    if (instruction.operand_count_actual < 2U) {
+        set_error(vm, "read opcode is missing text or parse buffer operands");
+        return TCL_ERROR;
+    }
+    if (zmachine_resolve_operands(vm, &instruction, values, ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+    if (zmachine_input_read_line(vm, values[0], values[1], &terminator) != TCL_OK) {
+        set_error(vm, "unable to store or tokenize line input");
+        return TCL_ERROR;
+    }
+
+    next_pc = instruction.next_pc;
+    if (vm->version >= 5U) {
+        uint8_t store_var;
+        if ((size_t)next_pc >= vm->memory_size) {
+            set_error(vm, "truncated read store variable");
+            return TCL_ERROR;
+        }
+        store_var = vm->memory[next_pc++];
+        if (zmachine_variable_write(vm, store_var, 0, terminator) != TCL_OK)
+            return TCL_ERROR;
+    }
+    vm->pc = next_pc;
     return TCL_OK;
 }
 
@@ -182,23 +223,27 @@ int zmachine_run(ZMachine *vm)
         if (vm) set_error(vm, "no story is loaded");
         return TCL_ERROR;
     }
-    if (vm->state == ZM_STATE_ERROR)
-        return TCL_ERROR;
-    if (vm->state == ZM_STATE_HALTED)
-        return TCL_OK;
+    if (vm->state == ZM_STATE_ERROR) return TCL_ERROR;
+    if (vm->state == ZM_STATE_HALTED) return TCL_OK;
 
     zmachine_output_clear(vm);
     vm->state = ZM_STATE_READY;
 
     while (vm->state == ZM_STATE_READY) {
+        int handled;
         if (++steps > ZM_RUN_STEP_LIMIT) {
             set_error(vm, "Z-machine execution step limit exceeded");
             return TCL_ERROR;
         }
+        if (handle_read_opcode(vm, &handled) != TCL_OK)
+            return TCL_ERROR;
+        if (vm->state != ZM_STATE_READY)
+            break;
+        if (handled)
+            continue;
         if (zmachine_step(vm) != TCL_OK)
             return TCL_ERROR;
     }
-
     return vm->state == ZM_STATE_ERROR ? TCL_ERROR : TCL_OK;
 }
 
