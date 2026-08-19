@@ -14,6 +14,7 @@ add_library(tclzmachine SHARED
     src/zmachine.c
     src/zmachine_decode.c
     src/zmachine_exec.c
+    src/zmachine_object.c
     src/zmachine_state.c
     src/zmachine_version.c
 )
@@ -80,11 +81,23 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(vm-state-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME vm-state COMMAND vm-state-test)
 
+    add_executable(object-test
+        tests/object.c
+        src/zmachine_object.c
+    )
+    target_include_directories(object-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${TCL_INCLUDE_PATH}
+    )
+    target_link_libraries(object-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME object-subsystem COMMAND object-test)
+
     add_executable(vm-exec-test
         tests/vm_exec.c
         src/zmachine.c
         src/zmachine_decode.c
         src/zmachine_exec.c
+        src/zmachine_object.c
         src/zmachine_state.c
         src/zmachine_version.c
     )
