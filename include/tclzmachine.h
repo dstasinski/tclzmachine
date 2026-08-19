@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <tcl.h>
 
+#include "zmachine_state.h"
 #include "zmachine_version.h"
 
 #ifdef __cplusplus
@@ -21,7 +22,7 @@ typedef enum ZMachineRunState {
     ZM_STATE_ERROR
 } ZMachineRunState;
 
-typedef struct ZMachine {
+struct ZMachine {
     uint8_t *memory;
     size_t memory_size;
 
@@ -46,13 +47,15 @@ typedef struct ZMachine {
     uint32_t pc;
     uint16_t stack[4096];
     size_t sp;
+    ZMachineFrame frames[ZM_MAX_FRAMES];
+    size_t frame_count;
 
     Tcl_DString output;
     Tcl_DString pending_input;
 
     ZMachineRunState state;
     char error[256];
-} ZMachine;
+};
 
 ZMachine *zmachine_create(void);
 void zmachine_destroy(ZMachine *vm);
