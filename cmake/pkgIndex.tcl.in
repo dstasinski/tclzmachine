@@ -1,0 +1,1 @@
+package ifneeded tclzmachine @PROJECT_VERSION@ [list load [file join $dir tclzmachine[info sharedlibextension]] Tclzmachine]
