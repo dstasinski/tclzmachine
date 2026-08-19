@@ -54,7 +54,13 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(object-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME object-subsystem COMMAND object-test)
 
-    add_executable(text-test tests/text.c src/zmachine_object.c src/zmachine_text.c src/zmachine_version.c)
+    add_executable(text-test
+        tests/text.c
+        src/zmachine.c
+        src/zmachine_object.c
+        src/zmachine_state.c
+        src/zmachine_text.c
+        src/zmachine_version.c)
     target_include_directories(text-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(text-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME text-decoder COMMAND text-test)
