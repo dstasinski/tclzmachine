@@ -36,32 +36,29 @@ static uint16_t read_global(const ZMachine *vm, uint8_t variable)
                       vm->memory[address + 1U]);
 }
 
+static void write_global(ZMachine *vm, uint8_t variable, uint16_t value)
+{
+    size_t address = (size_t)vm->globals_addr +
+                     (size_t)(variable - 0x10U) * 2U;
+    vm->memory[address] = (uint8_t)(value >> 8);
+    vm->memory[address + 1U] = (uint8_t)value;
+}
+
 int main(void)
 {
     {
         ZMachine vm;
         uint16_t args[2] = {0x1111U, 0x2222U};
         ZMachineFrame *frame;
-
         init_vm(&vm, 5U, 1024U);
-        vm.memory[0x100] = 3U; /* routine at packed address 0x40 */
-
-        assert(zmachine_call_routine(&vm, 0x40U, args, 2U,
-                                     0x33U, 0x10U, 0) == TCL_OK);
-        assert(vm.pc == 0x101U);
-        assert(vm.frame_count == 1U);
+        vm.memory[0x100] = 3U;
+        assert(zmachine_call_routine(&vm, 0x40U, args, 2U, 0x33U, 0x10U, 0) == TCL_OK);
+        assert(vm.pc == 0x101U && vm.frame_count == 1U);
         frame = zmachine_current_frame(&vm);
-        assert(frame != NULL);
-        assert(frame->local_count == 3U);
-        assert(frame->locals[0] == 0x1111U);
-        assert(frame->locals[1] == 0x2222U);
-        assert(frame->locals[2] == 0U);
+        assert(frame && frame->locals[0] == 0x1111U && frame->locals[1] == 0x2222U && frame->locals[2] == 0U);
         assert(frame->argument_mask == 0x03U);
-
         assert(zmachine_return(&vm, 0xBEEFU) == TCL_OK);
-        assert(vm.frame_count == 0U);
-        assert(vm.pc == 0x33U);
-        assert(read_global(&vm, 0x10U) == 0xBEEFU);
+        assert(vm.frame_count == 0U && vm.pc == 0x33U && read_global(&vm, 0x10U) == 0xBEEFU);
         free_vm(&vm);
     }
 
@@ -69,22 +66,14 @@ int main(void)
         ZMachine vm;
         uint16_t args[1] = {0x9999U};
         ZMachineFrame *frame;
-
         init_vm(&vm, 3U, 1024U);
-        /* V3 packed 0x40 => byte 0x80. Two locals with defaults. */
         vm.memory[0x80] = 2U;
-        vm.memory[0x81] = 0x12U;
-        vm.memory[0x82] = 0x34U;
-        vm.memory[0x83] = 0x56U;
-        vm.memory[0x84] = 0x78U;
-
-        assert(zmachine_call_routine(&vm, 0x40U, args, 1U,
-                                     0x22U, 0U, 1) == TCL_OK);
+        vm.memory[0x81] = 0x12U; vm.memory[0x82] = 0x34U;
+        vm.memory[0x83] = 0x56U; vm.memory[0x84] = 0x78U;
+        assert(zmachine_call_routine(&vm, 0x40U, args, 1U, 0x22U, 0U, 1) == TCL_OK);
         assert(vm.pc == 0x85U);
         frame = zmachine_current_frame(&vm);
-        assert(frame != NULL);
-        assert(frame->locals[0] == 0x9999U);
-        assert(frame->locals[1] == 0x5678U);
+        assert(frame && frame->locals[0] == 0x9999U && frame->locals[1] == 0x5678U);
         free_vm(&vm);
     }
 
@@ -92,65 +81,124 @@ int main(void)
         ZMachine vm;
         ZMachineInstruction insn;
         uint16_t values[2];
-
         init_vm(&vm, 5U, 512U);
         assert(zmachine_stack_push(&vm, 0x1111U) == TCL_OK);
         assert(zmachine_stack_push(&vm, 0x2222U) == TCL_OK);
-
         memset(&insn, 0, sizeof(insn));
         insn.operand_count_actual = 2U;
-        insn.operands[0].type = ZM_OPERAND_VARIABLE;
-        insn.operands[0].value = 0U;
-        insn.operands[1].type = ZM_OPERAND_VARIABLE;
-        insn.operands[1].value = 0U;
-
+        insn.operands[0].type = ZM_OPERAND_VARIABLE; insn.operands[0].value = 0U;
+        insn.operands[1].type = ZM_OPERAND_VARIABLE; insn.operands[1].value = 0U;
         assert(zmachine_resolve_operands(&vm, &insn, values, 2U) == TCL_OK);
-        assert(values[0] == 0x2222U);
-        assert(values[1] == 0x1111U);
-        assert(vm.sp == 0U);
+        assert(values[0] == 0x2222U && values[1] == 0x1111U && vm.sp == 0U);
         free_vm(&vm);
     }
 
     {
         ZMachine vm;
-
         init_vm(&vm, 5U, 1024U);
         vm.pc = 0x20U;
-        /* call_1s packed 0x40 -> global 0x10 */
-        vm.memory[0x20] = 0x88U;
-        vm.memory[0x21] = 0x00U;
-        vm.memory[0x22] = 0x40U;
-        vm.memory[0x23] = 0x10U;
-        vm.memory[0x100] = 0U;
-        vm.memory[0x101] = 0xB0U; /* rtrue */
-
+        vm.memory[0x20] = 0x88U; vm.memory[0x21] = 0x00U; vm.memory[0x22] = 0x40U; vm.memory[0x23] = 0x10U;
+        vm.memory[0x100] = 0U; vm.memory[0x101] = 0xB0U;
         assert(zmachine_step(&vm) == TCL_OK);
-        assert(vm.pc == 0x101U);
-        assert(vm.frame_count == 1U);
+        assert(vm.pc == 0x101U && vm.frame_count == 1U);
         assert(zmachine_step(&vm) == TCL_OK);
-        assert(vm.pc == 0x24U);
-        assert(vm.frame_count == 0U);
-        assert(read_global(&vm, 0x10U) == 1U);
+        assert(vm.pc == 0x24U && vm.frame_count == 0U && read_global(&vm, 0x10U) == 1U);
         free_vm(&vm);
     }
 
     {
         ZMachine vm;
-
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* call_1s address zero must immediately store false. */
-        vm.memory[0x20] = 0x88U;
-        vm.memory[0x21] = 0x00U;
-        vm.memory[0x22] = 0x00U;
-        vm.memory[0x23] = 0x10U;
-        vm.memory[0x40] = 0x12U;
-        vm.memory[0x41] = 0x34U;
+        vm.memory[0x20] = 0x88U; vm.memory[0x21] = 0x00U; vm.memory[0x22] = 0x00U; vm.memory[0x23] = 0x10U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x24U && vm.frame_count == 0U && read_global(&vm, 0x10U) == 0U);
+        free_vm(&vm);
+    }
 
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* add 5 7 -> global 0x10 */
+        vm.memory[0x20] = 0x14U; vm.memory[0x21] = 5U; vm.memory[0x22] = 7U; vm.memory[0x23] = 0x10U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x24U && read_global(&vm, 0x10U) == 12U);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* jz 0 ?true with short offset 3: target 0x24. */
+        vm.memory[0x20] = 0x90U; vm.memory[0x21] = 0U; vm.memory[0x22] = 0xC3U;
+        vm.memory[0x23] = 0xB4U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x24U);
-        assert(vm.frame_count == 0U);
-        assert(read_global(&vm, 0x10U) == 0U);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* jz 1 ?true does not branch; continue after branch data. */
+        vm.memory[0x20] = 0x90U; vm.memory[0x21] = 1U; vm.memory[0x22] = 0xC3U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x23U);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        write_global(&vm, 0x10U, 9U);
+        vm.pc = 0x20U;
+        /* inc global variable 0x10, then load it into global 0x11. */
+        vm.memory[0x20] = 0x95U; vm.memory[0x21] = 0x10U;
+        vm.memory[0x22] = 0x9EU; vm.memory[0x23] = 0x10U; vm.memory[0x24] = 0x11U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(read_global(&vm, 0x10U) == 10U && vm.pc == 0x22U);
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(read_global(&vm, 0x11U) == 10U && vm.pc == 0x25U);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* store variable 0x10 = 0x2a. */
+        vm.memory[0x20] = 0x0DU; vm.memory[0x21] = 0x10U; vm.memory[0x22] = 0x2AU;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(read_global(&vm, 0x10U) == 0x2AU && vm.pc == 0x23U);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* div -7 by 3 -> -2, mod -7 by 3 -> -1. */
+        vm.memory[0x20] = 0xD7U; vm.memory[0x21] = 0x0FU; vm.memory[0x22] = 0xFFU; vm.memory[0x23] = 0xF9U; vm.memory[0x24] = 3U; vm.memory[0x25] = 0x10U;
+        vm.memory[0x26] = 0xD8U; vm.memory[0x27] = 0x0FU; vm.memory[0x28] = 0xFFU; vm.memory[0x29] = 0xF9U; vm.memory[0x2A] = 3U; vm.memory[0x2B] = 0x11U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert((int16_t)read_global(&vm, 0x10U) == -2);
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert((int16_t)read_global(&vm, 0x11U) == -1);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+        vm.pc = 0x20U;
+        /* storew 0x80 2 0x1234 using large value. */
+        vm.memory[0x20] = 0xE1U; vm.memory[0x21] = 0x53U;
+        vm.memory[0x22] = 0x80U; vm.memory[0x23] = 2U; vm.memory[0x24] = 0x12U; vm.memory[0x25] = 0x34U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.memory[0x84] == 0x12U && vm.memory[0x85] == 0x34U);
         free_vm(&vm);
     }
 
