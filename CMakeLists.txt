@@ -108,6 +108,22 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(vm-exec-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME vm-exec COMMAND vm-exec-test)
 
+    add_executable(object-exec-test
+        tests/object_exec.c
+        src/zmachine.c
+        src/zmachine_decode.c
+        src/zmachine_exec.c
+        src/zmachine_object.c
+        src/zmachine_state.c
+        src/zmachine_version.c
+    )
+    target_include_directories(object-exec-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${TCL_INCLUDE_PATH}
+    )
+    target_link_libraries(object-exec-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME object-opcodes COMMAND object-exec-test)
+
     add_test(
         NAME package-smoke
         COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>
