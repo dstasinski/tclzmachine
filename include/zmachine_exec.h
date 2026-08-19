@@ -11,8 +11,6 @@
 extern "C" {
 #endif
 
-typedef struct ZMachine ZMachine;
-
 /* Resolve raw decoded operands from first to last. Variable operands are
  * dereferenced using normal Z-machine semantics, including popping variable
  * 0 (the evaluation stack). */
@@ -36,8 +34,7 @@ int zmachine_call_routine(ZMachine *vm,
  * store the return value unless the call discarded its result. */
 int zmachine_return(ZMachine *vm, uint16_t value);
 
-/* Execute one instruction at vm->pc. This initial executor implements the
- * call/return family plus nop and quit. Unsupported opcodes report an error. */
+/* Execute one instruction at vm->pc. */
 int zmachine_step(ZMachine *vm);
 
 #ifdef __cplusplus
