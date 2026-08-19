@@ -52,6 +52,7 @@ struct ZMachine {
 
     Tcl_DString output;
     Tcl_DString pending_input;
+    int input_available;
 
     ZMachineRunState state;
     char error[256];
