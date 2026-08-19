@@ -2,12 +2,11 @@
 #define ZMACHINE_TEXT_H
 
 #include <stdint.h>
+#include "zmachine_state.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct ZMachine ZMachine;
 
 /* Decode and append a Z-encoded string beginning at a byte address. */
 int zmachine_text_print(ZMachine *vm, uint32_t address, uint32_t *next_address);
