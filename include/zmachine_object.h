@@ -2,12 +2,11 @@
 #define ZMACHINE_OBJECT_H
 
 #include <stdint.h>
+#include "zmachine_state.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct ZMachine ZMachine;
 
 typedef struct ZMachinePropertyInfo {
     uint16_t number;
