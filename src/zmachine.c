@@ -166,6 +166,7 @@ int zmachine_reset(ZMachine *vm)
 
     vm->pc = vm->initial_pc;
     vm->sp = 0;
+    vm->frame_count = 0;
     vm->state = ZM_STATE_READY;
     vm->error[0] = '\0';
     Tcl_DStringSetLength(&vm->output, 0);
