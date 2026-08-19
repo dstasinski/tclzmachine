@@ -120,7 +120,6 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* add 5 7 -> global 0x10 */
         vm.memory[0x20] = 0x14U; vm.memory[0x21] = 5U; vm.memory[0x22] = 7U; vm.memory[0x23] = 0x10U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x24U && read_global(&vm, 0x10U) == 12U);
@@ -131,7 +130,6 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* jz 0 ?true with short offset 3: target 0x24. */
         vm.memory[0x20] = 0x90U; vm.memory[0x21] = 0U; vm.memory[0x22] = 0xC3U;
         vm.memory[0x23] = 0xB4U;
         assert(zmachine_step(&vm) == TCL_OK);
@@ -143,7 +141,6 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* jz 1 ?true does not branch; continue after branch data. */
         vm.memory[0x20] = 0x90U; vm.memory[0x21] = 1U; vm.memory[0x22] = 0xC3U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x23U);
@@ -155,7 +152,6 @@ int main(void)
         init_vm(&vm, 5U, 512U);
         write_global(&vm, 0x10U, 9U);
         vm.pc = 0x20U;
-        /* inc global variable 0x10, then load it into global 0x11. */
         vm.memory[0x20] = 0x95U; vm.memory[0x21] = 0x10U;
         vm.memory[0x22] = 0x9EU; vm.memory[0x23] = 0x10U; vm.memory[0x24] = 0x11U;
         assert(zmachine_step(&vm) == TCL_OK);
@@ -169,7 +165,6 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* store variable 0x10 = 0x2a. */
         vm.memory[0x20] = 0x0DU; vm.memory[0x21] = 0x10U; vm.memory[0x22] = 0x2AU;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(read_global(&vm, 0x10U) == 0x2AU && vm.pc == 0x23U);
@@ -180,13 +175,20 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* div -7 by 3 -> -2, mod -7 by 3 -> -1. */
-        vm.memory[0x20] = 0xD7U; vm.memory[0x21] = 0x0FU; vm.memory[0x22] = 0xFFU; vm.memory[0x23] = 0xF9U; vm.memory[0x24] = 3U; vm.memory[0x25] = 0x10U;
-        vm.memory[0x26] = 0xD8U; vm.memory[0x27] = 0x0FU; vm.memory[0x28] = 0xFFU; vm.memory[0x29] = 0xF9U; vm.memory[0x2A] = 3U; vm.memory[0x2B] = 0x11U;
+        /* variable-form div, both operands large constants: -7 / 3 */
+        vm.memory[0x20] = 0xD7U; vm.memory[0x21] = 0x0FU;
+        vm.memory[0x22] = 0xFFU; vm.memory[0x23] = 0xF9U;
+        vm.memory[0x24] = 0x00U; vm.memory[0x25] = 0x03U;
+        vm.memory[0x26] = 0x10U;
+        /* variable-form mod, both operands large constants: -7 % 3 */
+        vm.memory[0x27] = 0xD8U; vm.memory[0x28] = 0x0FU;
+        vm.memory[0x29] = 0xFFU; vm.memory[0x2A] = 0xF9U;
+        vm.memory[0x2B] = 0x00U; vm.memory[0x2C] = 0x03U;
+        vm.memory[0x2D] = 0x11U;
         assert(zmachine_step(&vm) == TCL_OK);
-        assert((int16_t)read_global(&vm, 0x10U) == -2);
+        assert(vm.pc == 0x27U && (int16_t)read_global(&vm, 0x10U) == -2);
         assert(zmachine_step(&vm) == TCL_OK);
-        assert((int16_t)read_global(&vm, 0x11U) == -1);
+        assert(vm.pc == 0x2EU && (int16_t)read_global(&vm, 0x11U) == -1);
         free_vm(&vm);
     }
 
@@ -194,7 +196,6 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
         vm.pc = 0x20U;
-        /* storew 0x80 2 0x1234 using large value. */
         vm.memory[0x20] = 0xE1U; vm.memory[0x21] = 0x53U;
         vm.memory[0x22] = 0x80U; vm.memory[0x23] = 2U; vm.memory[0x24] = 0x12U; vm.memory[0x25] = 0x34U;
         assert(zmachine_step(&vm) == TCL_OK);
