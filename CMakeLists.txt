@@ -12,6 +12,7 @@ find_package(TCL 8.6 REQUIRED)
 add_library(tclzmachine SHARED
     src/tcl_extension.c
     src/zmachine.c
+    src/zmachine_decode.c
     src/zmachine_version.c
 )
 
@@ -26,7 +27,6 @@ target_link_libraries(tclzmachine PRIVATE ${TCL_LIBRARY})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(tclzmachine PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
 
 set_target_properties(tclzmachine PROPERTIES
     PREFIX ""
@@ -59,6 +59,13 @@ if(TCLZMACHINE_BUILD_TESTS)
     )
     target_include_directories(version-layout-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME version-layout COMMAND version-layout-test)
+
+    add_executable(instruction-decode-test
+        tests/instruction_decode.c
+        src/zmachine_decode.c
+    )
+    target_include_directories(instruction-decode-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME instruction-decode COMMAND instruction-decode-test)
 
     add_test(
         NAME package-smoke
