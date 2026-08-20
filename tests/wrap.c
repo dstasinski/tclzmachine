@@ -12,12 +12,29 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Compare a Tcl_DString against the exact byte sequence expected. */
+/*
+ * Compare a Tcl_DString against the exact byte sequence expected.
+ *
+ * On failure, print both strings before aborting so wrapping regressions can be
+ * diagnosed from normal CTest output without attaching a debugger.
+ */
 static void assert_string(const Tcl_DString *value, const char *expected)
 {
-    assert((size_t)Tcl_DStringLength((Tcl_DString *)value) == strlen(expected));
-    assert(memcmp(Tcl_DStringValue((Tcl_DString *)value),
-                  expected, strlen(expected)) == 0);
+    const char *actual = Tcl_DStringValue((Tcl_DString *)value);
+    size_t actual_len = (size_t)Tcl_DStringLength((Tcl_DString *)value);
+    size_t expected_len = strlen(expected);
+
+    if (actual_len != expected_len ||
+        memcmp(actual, expected, expected_len) != 0) {
+        fprintf(stderr,
+                "wrap mismatch\n--- expected (%lu bytes) ---\n%.*s\n"
+                "--- actual (%lu bytes) ---\n%.*s\n",
+                (unsigned long)expected_len,
+                (int)expected_len, expected,
+                (unsigned long)actual_len,
+                (int)actual_len, actual);
+        assert(0 && "wrapped output mismatch");
+    }
 }
 
 int main(void)
