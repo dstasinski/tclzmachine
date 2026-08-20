@@ -1,0 +1,65 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - Frobnost
+  pull_request:
+    branches:
+      - Frobnost
+  workflow_dispatch:
+
+# A newer push makes an older run for the same branch irrelevant.  Cancelling
+# it conserves GitHub Actions minutes while development is moving quickly.
+concurrency:
+  group: tclzmachine-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Ubuntu / GCC / Tcl 8.6
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            tcl8.6 \
+            tcl8.6-dev
+
+      - name: Configure Debug build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DTCLZMACHINE_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run test suite
+        run: ctest --test-dir build --output-on-failure
+
+      # LastTest.log contains CTest's detailed per-test output and is especially
+      # useful when the concise Actions console output is not enough to diagnose
+      # a failure.  Upload only on failure to avoid unnecessary artifact storage.
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tclzmachine-test-failure-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/CMakeFiles/CMakeOutput.log
+            build/CMakeFiles/CMakeError.log
