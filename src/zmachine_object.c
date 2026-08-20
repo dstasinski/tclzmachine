@@ -1,9 +1,28 @@
+/*
+ * zmachine_object.c
+ *
+ * Version-aware implementation of the Z-machine object tree and property
+ * table model.
+ *
+ * The object format changes materially after V3.  V1-V3 object entries are
+ * 9 bytes long, provide 32 attributes, and store parent/sibling/child object
+ * numbers as single bytes.  V4+ object entries are 14 bytes long, provide 48
+ * attributes, and use 16-bit object numbers for the tree links.  Property
+ * headers also have different encodings in those two version families.
+ *
+ * This module hides those differences from opcode execution.  Callers work in
+ * terms of object numbers, relationships, attributes, and property numbers;
+ * all byte-layout details stay here.  Writes are limited to dynamic memory as
+ * required by the Z-machine memory model.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_object.h"
 
 #include <stdio.h>
 #include <string.h>
 
+/* Record an object-subsystem error on the owning VM and return TCL_ERROR. */
 static int obj_error(ZMachine *vm, const char *message)
 {
     if (vm) {
@@ -13,6 +32,7 @@ static int obj_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
+/* Bounds-checked byte read from the mutable story image. */
 static int read_u8(const ZMachine *vm, uint32_t address, uint8_t *value)
 {
     if (!vm || !vm->memory || !value || (size_t)address >= vm->memory_size)
@@ -21,6 +41,7 @@ static int read_u8(const ZMachine *vm, uint32_t address, uint8_t *value)
     return TCL_OK;
 }
 
+/* Bounds-checked big-endian word read from the story image. */
 static int read_u16(const ZMachine *vm, uint32_t address, uint16_t *value)
 {
     if (!vm || !vm->memory || !value || (size_t)address + 1U >= vm->memory_size)
@@ -29,6 +50,7 @@ static int read_u16(const ZMachine *vm, uint32_t address, uint16_t *value)
     return TCL_OK;
 }
 
+/* Write one byte, rejecting attempts to modify static/high memory. */
 static int write_u8(ZMachine *vm, uint32_t address, uint8_t value)
 {
     if (!vm || !vm->memory || (size_t)address >= vm->memory_size ||
@@ -38,6 +60,7 @@ static int write_u8(ZMachine *vm, uint32_t address, uint8_t value)
     return TCL_OK;
 }
 
+/* Write one big-endian word, rejecting attempts to modify static memory. */
 static int write_u16(ZMachine *vm, uint32_t address, uint16_t value)
 {
     if (!vm || !vm->memory || (size_t)address + 1U >= vm->memory_size ||
@@ -48,16 +71,22 @@ static int write_u16(ZMachine *vm, uint32_t address, uint16_t value)
     return TCL_OK;
 }
 
+/*
+ * Bytes occupied by the default-property table preceding object #1.
+ * V1-V3 expose 31 default words (62 bytes); V4+ expose 63 (126 bytes).
+ */
 static uint32_t defaults_size(const ZMachine *vm)
 {
     return (vm->version <= 3U) ? 62U : 126U;
 }
 
+/* Return the byte size of one object entry for the current story version. */
 static uint32_t object_entry_size(const ZMachine *vm)
 {
     return (vm->version <= 3U) ? 9U : 14U;
 }
 
+/* Translate a 1-based object number into its object-table byte address. */
 static int object_entry(const ZMachine *vm, uint16_t object, uint32_t *address)
 {
     uint32_t base;
@@ -74,6 +103,10 @@ static int object_entry(const ZMachine *vm, uint16_t object, uint32_t *address)
     return TCL_OK;
 }
 
+/*
+ * Return the offset of parent, sibling, or child inside an object entry.
+ * which: 0=parent, 1=sibling, 2=child.
+ */
 static int relation_offset(const ZMachine *vm, int which, uint32_t *offset)
 {
     if (!vm || !offset) return TCL_ERROR;
@@ -85,6 +118,7 @@ static int relation_offset(const ZMachine *vm, int which, uint32_t *offset)
     return TCL_OK;
 }
 
+/* Read one tree relationship, widening V1-V3's byte-sized object number. */
 static int get_relation(const ZMachine *vm, uint16_t object, int which, uint16_t *value)
 {
     uint32_t entry, offset;
@@ -100,6 +134,7 @@ static int get_relation(const ZMachine *vm, uint16_t object, int which, uint16_t
     return read_u16(vm, entry + offset, value);
 }
 
+/* Write one tree relationship using the version-appropriate field width. */
 static int set_relation(ZMachine *vm, uint16_t object, int which, uint16_t value)
 {
     uint32_t entry, offset;
@@ -113,6 +148,7 @@ static int set_relation(ZMachine *vm, uint16_t object, int which, uint16_t value
     return write_u16(vm, entry + offset, value);
 }
 
+/* Public relationship accessors keep opcode code independent of layout. */
 int zmachine_object_get_parent(const ZMachine *vm, uint16_t object, uint16_t *parent)
 { return get_relation(vm, object, 0, parent); }
 int zmachine_object_get_sibling(const ZMachine *vm, uint16_t object, uint16_t *sibling)
@@ -126,6 +162,7 @@ int zmachine_object_set_sibling(ZMachine *vm, uint16_t object, uint16_t sibling)
 int zmachine_object_set_child(ZMachine *vm, uint16_t object, uint16_t child)
 { return set_relation(vm, object, 2, child); }
 
+/* Test an attribute bit; attributes are numbered most-significant-bit first. */
 int zmachine_object_test_attr(const ZMachine *vm, uint16_t object, uint8_t attribute, int *is_set)
 {
     uint32_t entry;
@@ -138,6 +175,7 @@ int zmachine_object_test_attr(const ZMachine *vm, uint16_t object, uint8_t attri
     return TCL_OK;
 }
 
+/* Set or clear an attribute bit while preserving every other attribute. */
 int zmachine_object_set_attr(ZMachine *vm, uint16_t object, uint8_t attribute, int is_set)
 {
     uint32_t entry, address;
@@ -152,6 +190,14 @@ int zmachine_object_set_attr(ZMachine *vm, uint16_t object, uint8_t attribute, i
     return write_u8(vm, address, byte);
 }
 
+/*
+ * Unlink an object from its parent's child/sibling chain.
+ *
+ * The Z-machine stores children as a singly-linked sibling list.  Removing an
+ * object therefore requires either replacing the parent's first-child field or
+ * walking the sibling chain to splice the object out.  The removed object is
+ * left with parent=0 and sibling=0 as required by remove_obj semantics.
+ */
 int zmachine_object_remove(ZMachine *vm, uint16_t object)
 {
     uint16_t parent, sibling, first, current, next;
@@ -181,6 +227,7 @@ int zmachine_object_remove(ZMachine *vm, uint16_t object)
     return zmachine_object_set_sibling(vm, object, 0U);
 }
 
+/* Remove an object from its old parent and make it the new first child. */
 int zmachine_object_insert(ZMachine *vm, uint16_t object, uint16_t destination)
 {
     uint16_t first;
@@ -196,6 +243,7 @@ int zmachine_object_insert(ZMachine *vm, uint16_t object, uint16_t destination)
     return TCL_OK;
 }
 
+/* Read the property-table pointer stored at the end of an object entry. */
 int zmachine_object_property_table(const ZMachine *vm, uint16_t object, uint32_t *address)
 {
     uint32_t entry;
@@ -209,6 +257,7 @@ int zmachine_object_property_table(const ZMachine *vm, uint16_t object, uint32_t
     return TCL_OK;
 }
 
+/* Skip the object's short name and return the first property-header address. */
 static int first_property_header(const ZMachine *vm, uint16_t object, uint32_t *address)
 {
     uint32_t table;
@@ -221,6 +270,14 @@ static int first_property_header(const ZMachine *vm, uint16_t object, uint32_t *
     return TCL_OK;
 }
 
+/*
+ * Decode one property header into a uniform representation.
+ *
+ * V1-V3 use one byte: bits 0-4 are the property number and bits 5-7 encode
+ * length-1.  V4+ use a six-bit property number and either a one-byte size form
+ * (length 1 or 2) or, when bit 7 is set, a second size byte whose low six bits
+ * encode length 1..64, with zero representing 64.
+ */
 static int parse_property(const ZMachine *vm, uint32_t header, ZMachinePropertyInfo *info)
 {
     uint8_t first;
@@ -253,6 +310,12 @@ static int parse_property(const ZMachine *vm, uint32_t header, ZMachinePropertyI
     return TCL_OK;
 }
 
+/*
+ * Locate a numbered property in an object's descending property list.
+ * A zeroed result means the property is absent; that distinction lets
+ * get_prop fall back to the default-property table without treating absence as
+ * an interpreter error.
+ */
 int zmachine_object_find_property(const ZMachine *vm, uint16_t object, uint16_t property,
                                   ZMachinePropertyInfo *info)
 {
@@ -271,6 +334,7 @@ int zmachine_object_find_property(const ZMachine *vm, uint16_t object, uint16_t 
     return TCL_OK;
 }
 
+/* Read a 1- or 2-byte property, or its default value when it is absent. */
 int zmachine_object_get_prop(const ZMachine *vm, uint16_t object, uint16_t property, uint16_t *value)
 {
     ZMachinePropertyInfo info;
@@ -292,6 +356,7 @@ int zmachine_object_get_prop(const ZMachine *vm, uint16_t object, uint16_t prope
     return TCL_ERROR;
 }
 
+/* Update an existing property; put_prop is defined only for 1- or 2-byte data. */
 int zmachine_object_put_prop(ZMachine *vm, uint16_t object, uint16_t property, uint16_t value)
 {
     ZMachinePropertyInfo info;
@@ -303,6 +368,7 @@ int zmachine_object_put_prop(ZMachine *vm, uint16_t object, uint16_t property, u
     return obj_error(vm, "put_prop requires a one- or two-byte property");
 }
 
+/* Return the first data-byte address for a property, or zero when absent. */
 int zmachine_object_get_prop_addr(const ZMachine *vm, uint16_t object, uint16_t property, uint16_t *address)
 {
     ZMachinePropertyInfo info;
@@ -311,6 +377,12 @@ int zmachine_object_get_prop_addr(const ZMachine *vm, uint16_t object, uint16_t 
     return TCL_OK;
 }
 
+/*
+ * Iterate the descending property list.
+ * property==0 requests the first property; otherwise the named property must
+ * exist and the function returns the number of the following property, with 0
+ * marking the end of the list.
+ */
 int zmachine_object_get_next_prop(const ZMachine *vm, uint16_t object, uint16_t property, uint16_t *next_property)
 {
     uint32_t header;
