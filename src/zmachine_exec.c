@@ -1,12 +1,24 @@
+/*
+ * zmachine_exec.c
+ *
+ * Core Z-machine instruction execution.  This module resolves decoded
+ * operands, performs routine calls and returns, applies store/branch records,
+ * and implements the non-blocking opcode set used by the text-only runtime.
+ * Input opcodes which may suspend execution are handled by the cooperative
+ * run loop in zmachine.c instead of here.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
 #include "zmachine_object.h"
+#include "zmachine_property.h"
 #include "zmachine_text.h"
 
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
+/* Put the VM into its terminal error state with a concise diagnostic. */
 static void exec_error(ZMachine *vm, const char *message)
 {
     if (!vm) return;
@@ -14,6 +26,7 @@ static void exec_error(ZMachine *vm, const char *message)
     snprintf(vm->error, sizeof(vm->error), "%s", message);
 }
 
+/* Read one byte from story memory with bounds checking. */
 static int read_byte(const ZMachine *vm, uint32_t address, uint8_t *value)
 {
     if (!vm || !vm->memory || !value || (size_t)address >= vm->memory_size)
@@ -22,6 +35,7 @@ static int read_byte(const ZMachine *vm, uint32_t address, uint8_t *value)
     return TCL_OK;
 }
 
+/* Read one big-endian word from story memory with bounds checking. */
 static int read_word(const ZMachine *vm, uint32_t address, uint16_t *value)
 {
     if (!vm || !vm->memory || !value || (size_t)address + 1U >= vm->memory_size)
@@ -31,6 +45,7 @@ static int read_word(const ZMachine *vm, uint32_t address, uint16_t *value)
     return TCL_OK;
 }
 
+/* Write one byte, rejecting illegal writes to static/high memory. */
 static int write_byte(ZMachine *vm, uint32_t address, uint8_t value)
 {
     if (!vm || !vm->memory || (size_t)address >= vm->memory_size ||
@@ -42,6 +57,7 @@ static int write_byte(ZMachine *vm, uint32_t address, uint8_t value)
     return TCL_OK;
 }
 
+/* Write one big-endian word, rejecting writes outside dynamic memory. */
 static int write_word(ZMachine *vm, uint32_t address, uint16_t value)
 {
     if (!vm || !vm->memory || (size_t)address + 1U >= vm->memory_size ||
@@ -54,6 +70,13 @@ static int write_word(ZMachine *vm, uint32_t address, uint16_t value)
     return TCL_OK;
 }
 
+/*
+ * Resolve decoded operands from left to right.
+ *
+ * Left-to-right evaluation is significant because reading variable 0 pops the
+ * evaluation stack.  Resolving in any other order would change observable VM
+ * behavior for instructions which reference the stack more than once.
+ */
 int zmachine_resolve_operands(ZMachine *vm,
                               const ZMachineInstruction *instruction,
                               uint16_t *values,
@@ -85,6 +108,14 @@ int zmachine_resolve_operands(ZMachine *vm,
     return TCL_OK;
 }
 
+/*
+ * Enter a Z-machine routine from its packed address.
+ *
+ * V1-V4 routines carry default values for locals in the routine header;
+ * V5+ locals begin at zero.  Supplied arguments overwrite those initial local
+ * values.  A packed address of zero is the standard special case which
+ * returns false immediately without creating a call frame.
+ */
 int zmachine_call_routine(ZMachine *vm,
                           uint16_t packed_address,
                           const uint16_t *arguments,
@@ -151,6 +182,7 @@ int zmachine_call_routine(ZMachine *vm,
     return TCL_OK;
 }
 
+/* Restore the caller frame and optionally store the routine return value. */
 int zmachine_return(ZMachine *vm, uint16_t value)
 {
     ZMachineFrame frame;
@@ -164,6 +196,7 @@ int zmachine_return(ZMachine *vm, uint16_t value)
     return TCL_OK;
 }
 
+/* Store a result in the variable byte following an instruction. */
 static int store_result(ZMachine *vm, uint32_t store_pc, uint16_t value,
                         uint32_t *next_pc)
 {
@@ -178,6 +211,7 @@ static int store_result(ZMachine *vm, uint32_t store_pc, uint16_t value,
     return TCL_OK;
 }
 
+/* Decode and apply the compact Z-machine branch record following an opcode. */
 static int branch_result(ZMachine *vm, uint32_t branch_pc, int condition)
 {
     uint8_t first, second = 0U;
@@ -221,6 +255,7 @@ static int branch_result(ZMachine *vm, uint32_t branch_pc, int condition)
     return TCL_OK;
 }
 
+/* Store a value, then interpret the branch record immediately after it. */
 static int store_then_branch(ZMachine *vm, uint32_t store_pc,
                              uint16_t value, int condition)
 {
@@ -230,6 +265,7 @@ static int store_then_branch(ZMachine *vm, uint32_t store_pc,
     return branch_result(vm, branch_pc, condition);
 }
 
+/* Execute one of the call-family instructions after operands are resolved. */
 static int execute_call(ZMachine *vm,
                         const ZMachineInstruction *instruction,
                         const uint16_t *values,
@@ -257,6 +293,7 @@ static int execute_call(ZMachine *vm,
                                  return_pc, store_variable, discard_result);
 }
 
+/* Convenience wrapper for ordinary store-result opcodes. */
 static int execute_store(ZMachine *vm,
                          const ZMachineInstruction *instruction,
                          uint16_t value)
@@ -268,6 +305,7 @@ static int execute_store(ZMachine *vm,
     return TCL_OK;
 }
 
+/* Perform signed 16-bit division or remainder with Z-machine error handling. */
 static int signed_divmod(ZMachine *vm, int16_t a, int16_t b,
                          int want_mod, uint16_t *result)
 {
@@ -284,6 +322,7 @@ static int signed_divmod(ZMachine *vm, int16_t a, int16_t b,
     return TCL_OK;
 }
 
+/* Decode and execute exactly one instruction at vm->pc. */
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -367,7 +406,15 @@ int zmachine_step(ZMachine *vm)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, parent);
         }
-        case 5U: {
+        case 4U: { /* get_prop_len property-address -> result */
+            uint16_t length;
+            if (zmachine_property_length_from_address(vm, values[0], &length) != TCL_OK) {
+                exec_error(vm, "invalid property address in get_prop_len");
+                return TCL_ERROR;
+            }
+            return execute_store(vm, &instruction, length);
+        }
+        case 5U: { /* inc (variable) */
             uint8_t var = (uint8_t)values[0];
             uint16_t v;
             if (zmachine_variable_read(vm, var, 1, &v) != TCL_OK) return TCL_ERROR;
@@ -376,7 +423,7 @@ int zmachine_step(ZMachine *vm)
             vm->pc = instruction.next_pc;
             return TCL_OK;
         }
-        case 6U: {
+        case 6U: { /* dec (variable) */
             uint8_t var = (uint8_t)values[0];
             uint16_t v;
             if (zmachine_variable_read(vm, var, 1, &v) != TCL_OK) return TCL_ERROR;
@@ -400,8 +447,8 @@ int zmachine_step(ZMachine *vm)
             if (zmachine_text_print_object_name(vm, values[0]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 11U: return zmachine_return(vm, values[0]);
-        case 12U: {
+        case 11U: return zmachine_return(vm, values[0]); /* ret */
+        case 12U: { /* jump */
             int16_t offset = (int16_t)values[0];
             vm->pc = (uint32_t)((int32_t)instruction.next_pc + offset - 2);
             if ((size_t)vm->pc >= vm->memory_size) {
@@ -414,7 +461,7 @@ int zmachine_step(ZMachine *vm)
             if (zmachine_text_print_packed(vm, values[0]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 14U: {
+        case 14U: { /* load (variable) -> result */
             uint16_t v;
             if (zmachine_variable_read(vm, (uint8_t)values[0], 1, &v) != TCL_OK)
                 return TCL_ERROR;
@@ -422,15 +469,15 @@ int zmachine_step(ZMachine *vm)
         }
         case 15U:
             if (vm->version <= 4U)
-                return execute_store(vm, &instruction, (uint16_t)~values[0]);
-            return execute_call(vm, &instruction, values, 1);
+                return execute_store(vm, &instruction, (uint16_t)~values[0]); /* not */
+            return execute_call(vm, &instruction, values, 1); /* call_1n */
         default: break;
         }
     }
 
     if (instruction.operand_count == ZM_OPERANDS_2OP) {
         switch (instruction.opcode_number) {
-        case 1U: {
+        case 1U: { /* je */
             uint8_t i;
             int equal = 0;
             for (i = 1U; i < instruction.operand_count_actual; ++i)
@@ -438,10 +485,10 @@ int zmachine_step(ZMachine *vm)
             return branch_result(vm, instruction.next_pc, equal);
         }
         case 2U: return branch_result(vm, instruction.next_pc,
-                                      (int16_t)values[0] < (int16_t)values[1]);
+                                      (int16_t)values[0] < (int16_t)values[1]); /* jl */
         case 3U: return branch_result(vm, instruction.next_pc,
-                                      (int16_t)values[0] > (int16_t)values[1]);
-        case 4U: {
+                                      (int16_t)values[0] > (int16_t)values[1]); /* jg */
+        case 4U: { /* dec_chk */
             uint8_t var = (uint8_t)values[0];
             uint16_t v;
             if (zmachine_variable_read(vm, var, 1, &v) != TCL_OK) return TCL_ERROR;
@@ -450,7 +497,7 @@ int zmachine_step(ZMachine *vm)
             return branch_result(vm, instruction.next_pc,
                                  (int16_t)v < (int16_t)values[1]);
         }
-        case 5U: {
+        case 5U: { /* inc_chk */
             uint8_t var = (uint8_t)values[0];
             uint16_t v;
             if (zmachine_variable_read(vm, var, 1, &v) != TCL_OK) return TCL_ERROR;
@@ -459,46 +506,46 @@ int zmachine_step(ZMachine *vm)
             return branch_result(vm, instruction.next_pc,
                                  (int16_t)v > (int16_t)values[1]);
         }
-        case 6U: {
+        case 6U: { /* jin */
             uint16_t parent;
             if (zmachine_object_get_parent(vm, values[0], &parent) != TCL_OK)
                 return TCL_ERROR;
             return branch_result(vm, instruction.next_pc, parent == values[1]);
         }
         case 7U: return branch_result(vm, instruction.next_pc,
-                                      (values[0] & values[1]) == values[1]);
+                                      (values[0] & values[1]) == values[1]); /* test */
         case 8U: return execute_store(vm, &instruction,
-                                      (uint16_t)(values[0] | values[1]));
+                                      (uint16_t)(values[0] | values[1])); /* or */
         case 9U: return execute_store(vm, &instruction,
-                                      (uint16_t)(values[0] & values[1]));
-        case 10U: {
+                                      (uint16_t)(values[0] & values[1])); /* and */
+        case 10U: { /* test_attr */
             int is_set;
             if (zmachine_object_test_attr(vm, values[0], (uint8_t)values[1],
                                           &is_set) != TCL_OK)
                 return TCL_ERROR;
             return branch_result(vm, instruction.next_pc, is_set);
         }
-        case 11U:
+        case 11U: /* set_attr */
             if (zmachine_object_set_attr(vm, values[0], (uint8_t)values[1], 1) != TCL_OK)
                 return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 12U:
+        case 12U: /* clear_attr */
             if (zmachine_object_set_attr(vm, values[0], (uint8_t)values[1], 0) != TCL_OK)
                 return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 13U:
+        case 13U: /* store (variable) value */
             if (zmachine_variable_write(vm, (uint8_t)values[0], 1, values[1]) != TCL_OK)
                 return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 14U:
+        case 14U: /* insert_obj */
             if (zmachine_object_insert(vm, values[0], values[1]) != TCL_OK)
                 return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 15U: {
+        case 15U: { /* loadw */
             uint32_t addr = (uint32_t)values[0] + 2U * (uint32_t)values[1];
             uint16_t v;
             if (read_word(vm, addr, &v) != TCL_OK) {
@@ -507,7 +554,7 @@ int zmachine_step(ZMachine *vm)
             }
             return execute_store(vm, &instruction, v);
         }
-        case 16U: {
+        case 16U: { /* loadb */
             uint32_t addr = (uint32_t)values[0] + (uint32_t)values[1];
             uint8_t v;
             if (read_byte(vm, addr, &v) != TCL_OK) {
@@ -516,48 +563,48 @@ int zmachine_step(ZMachine *vm)
             }
             return execute_store(vm, &instruction, v);
         }
-        case 17U: {
+        case 17U: { /* get_prop */
             uint16_t value;
             if (zmachine_object_get_prop(vm, values[0], values[1], &value) != TCL_OK)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, value);
         }
-        case 18U: {
+        case 18U: { /* get_prop_addr */
             uint16_t address;
             if (zmachine_object_get_prop_addr(vm, values[0], values[1], &address) != TCL_OK)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, address);
         }
-        case 19U: {
+        case 19U: { /* get_next_prop */
             uint16_t next;
             if (zmachine_object_get_next_prop(vm, values[0], values[1], &next) != TCL_OK)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, next);
         }
         case 20U: return execute_store(vm, &instruction,
-                                      (uint16_t)(values[0] + values[1]));
+                                      (uint16_t)(values[0] + values[1])); /* add */
         case 21U: return execute_store(vm, &instruction,
-                                      (uint16_t)(values[0] - values[1]));
+                                      (uint16_t)(values[0] - values[1])); /* sub */
         case 22U: return execute_store(vm, &instruction,
                                       (uint16_t)((int32_t)(int16_t)values[0] *
-                                                 (int32_t)(int16_t)values[1]));
-        case 23U: {
+                                                 (int32_t)(int16_t)values[1])); /* mul */
+        case 23U: { /* div */
             uint16_t r;
             if (signed_divmod(vm, (int16_t)values[0], (int16_t)values[1], 0, &r) != TCL_OK)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, r);
         }
-        case 24U: {
+        case 24U: { /* mod */
             uint16_t r;
             if (signed_divmod(vm, (int16_t)values[0], (int16_t)values[1], 1, &r) != TCL_OK)
                 return TCL_ERROR;
             return execute_store(vm, &instruction, r);
         }
         case 25U:
-            if (vm->version >= 4U) return execute_call(vm, &instruction, values, 0);
+            if (vm->version >= 4U) return execute_call(vm, &instruction, values, 0); /* call_2s */
             break;
         case 26U:
-            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1);
+            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1); /* call_2n */
             break;
         default: break;
         }
@@ -565,20 +612,20 @@ int zmachine_step(ZMachine *vm)
 
     if (instruction.operand_count == ZM_OPERANDS_VAR) {
         switch (instruction.opcode_number) {
-        case 0U: return execute_call(vm, &instruction, values, 0);
-        case 1U: {
+        case 0U: return execute_call(vm, &instruction, values, 0); /* call_vs */
+        case 1U: { /* storew */
             uint32_t addr = (uint32_t)values[0] + 2U * (uint32_t)values[1];
             if (write_word(vm, addr, values[2]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
         }
-        case 2U: {
+        case 2U: { /* storeb */
             uint32_t addr = (uint32_t)values[0] + (uint32_t)values[1];
             if (write_byte(vm, addr, (uint8_t)values[2]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
         }
-        case 3U:
+        case 3U: /* put_prop */
             if (zmachine_object_put_prop(vm, values[0], values[1], values[2]) != TCL_OK)
                 return TCL_ERROR;
             vm->pc = instruction.next_pc;
@@ -598,11 +645,11 @@ int zmachine_step(ZMachine *vm)
             vm->pc = instruction.next_pc;
             return TCL_OK;
         }
-        case 8U:
+        case 8U: /* push */
             if (zmachine_stack_push(vm, values[0]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
-        case 9U: {
+        case 9U: { /* pull (variable) */
             uint16_t v;
             if (zmachine_stack_pop(vm, &v) != TCL_OK) return TCL_ERROR;
             if (zmachine_variable_write(vm, (uint8_t)values[0], 1, v) != TCL_OK)
@@ -611,13 +658,13 @@ int zmachine_step(ZMachine *vm)
             return TCL_OK;
         }
         case 12U:
-            if (vm->version >= 4U) return execute_call(vm, &instruction, values, 0);
+            if (vm->version >= 4U) return execute_call(vm, &instruction, values, 0); /* call_vs2 */
             break;
         case 25U:
-            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1);
+            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1); /* call_vn */
             break;
         case 26U:
-            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1);
+            if (vm->version >= 5U) return execute_call(vm, &instruction, values, 1); /* call_vn2 */
             break;
         default: break;
         }
