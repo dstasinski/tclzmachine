@@ -84,5 +84,10 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(input-run-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME input-run-loop COMMAND input-run-test)
 
+    add_executable(core-compat-test tests/core_compat.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(core-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(core-compat-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME core-compat-opcodes COMMAND core-compat-test)
+
     add_test(NAME package-smoke COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>)
 endif()
