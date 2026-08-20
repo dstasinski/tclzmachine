@@ -19,6 +19,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_state.c
     src/zmachine_text.c
     src/zmachine_version.c
+    src/zmachine_wrap.c
 )
 
 add_library(tclzmachine SHARED
@@ -94,6 +95,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(property-length-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(property-length-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME property-length COMMAND property-length-test)
+
+    add_executable(wrap-test tests/wrap.c src/zmachine_wrap.c)
+    target_include_directories(wrap-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(wrap-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME output-wrap COMMAND wrap-test)
 
     add_test(NAME package-smoke COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>)
 endif()
