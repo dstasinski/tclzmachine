@@ -1,0 +1,52 @@
+!% -v3
+!% $SERIAL=260819
+
+! tclzmachine-test.inf
+!
+! Purpose-built integration story for the tclzmachine interpreter.  The game
+! is intentionally small and deterministic so scripted conversations can test
+! parser input, object movement, properties, routine calls, arithmetic/state,
+! room movement, inventory, scoring, and ordinary text output without relying
+! on copyrighted commercial story files.
+!
+! The compiled V3 story is generated from this exact source by GitHub Actions
+! and committed under tests/games/compiled/.  Keep the fixed SERIAL above so a
+! rebuild is byte-stable when the source and compiler toolchain are unchanged.
+
+Constant Story "tclzmachine Test Adventure";
+Constant Headline "^A deterministic Z-machine integration fixture.^";
+Constant MAX_SCORE 10;
+
+Include "Parser";
+Include "VerbLib";
+
+Object TestLab "Test Lab"
+  with description
+      "You are in a small test laboratory. A doorway leads north.",
+  has light;
+
+Object -> Lamp "brass lamp"
+  with name 'brass' 'lamp',
+       description "The brass lamp is plain, sturdy, and made for testing.";
+
+Object NorthRoom "North Room"
+  with description
+      "This is the north room. The test laboratory is south.",
+       s_to TestLab,
+  has light;
+
+Object LabDoor "north doorway"
+  with name 'north' 'doorway' 'door',
+       description "It is an ordinary open doorway.",
+       door_to NorthRoom,
+       door_dir n_to,
+       found_in TestLab,
+  has scenery open door;
+
+[ Initialise;
+    location = TestLab;
+    score = 0;
+    print "tclzmachine integration fixture ready.^";
+];
+
+Include "Grammar";
