@@ -63,48 +63,56 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x23U && vm.state == ZM_STATE_READY);
 
-    /* VAR:13 erase_window small-constant operand. */
-    vm.memory[0x23] = 0xEDU;
+    /* VAR:11 set_window is likewise irrelevant to a single output stream. */
+    vm.memory[0x23] = 0xEBU;
     vm.memory[0x24] = 0x7FU;
-    vm.memory[0x25] = 1U;
+    vm.memory[0x25] = 0U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x26U && vm.state == ZM_STATE_READY);
 
-    /* VAR:17 set_text_style small-constant operand. */
-    vm.memory[0x26] = 0xF1U;
+    /* VAR:13 erase_window small-constant operand. */
+    vm.memory[0x26] = 0xEDU;
     vm.memory[0x27] = 0x7FU;
-    vm.memory[0x28] = 2U;
+    vm.memory[0x28] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x29U && vm.state == ZM_STATE_READY);
 
-    /* VAR:18 buffer_mode small-constant operand. */
-    vm.memory[0x29] = 0xF2U;
+    /* VAR:17 set_text_style small-constant operand. */
+    vm.memory[0x29] = 0xF1U;
     vm.memory[0x2A] = 0x7FU;
-    vm.memory[0x2B] = 1U;
+    vm.memory[0x2B] = 2U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x2CU && vm.state == ZM_STATE_READY);
+
+    /* VAR:18 buffer_mode small-constant operand. */
+    vm.memory[0x2C] = 0xF2U;
+    vm.memory[0x2D] = 0x7FU;
+    vm.memory[0x2E] = 1U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x2FU && vm.state == ZM_STATE_READY);
 
     /*
      * A no-op still evaluates variable operands. Variable 0 is the stack, so
      * this erase_window encoding must pop one value before advancing the PC.
      */
     assert(zmachine_stack_push(&vm, 0xFFFFU) == TCL_OK);
-    vm.memory[0x2C] = 0xEDU;
-    vm.memory[0x2D] = 0xBFU;
-    vm.memory[0x2E] = 0U;
+    vm.memory[0x2F] = 0xEDU;
+    vm.memory[0x30] = 0xBFU;
+    vm.memory[0x31] = 0U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x2FU && vm.sp == 0U);
+    assert(vm.pc == 0x32U && vm.sp == 0U);
 
     /*
-     * VAR:22 read_char stores ZSCII carriage return in text-only mode. The
-     * opcode's first operand is the required input-device selector value 1.
+     * VAR:22 read_char stores a printable synthetic key (space, ZSCII 32) in
+     * text-only mode. This avoids games which reject carriage return while
+     * still preserving a queued Tcl line for a later line-oriented read.
      */
-    vm.memory[0x2F] = 0xF6U;
-    vm.memory[0x30] = 0x7FU;
-    vm.memory[0x31] = 1U;
-    vm.memory[0x32] = 0x10U;
+    vm.memory[0x32] = 0xF6U;
+    vm.memory[0x33] = 0x7FU;
+    vm.memory[0x34] = 1U;
+    vm.memory[0x35] = 0x10U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x33U && read_global(&vm, 0x10U) == 13U);
+    assert(vm.pc == 0x36U && read_global(&vm, 0x10U) == 32U);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
