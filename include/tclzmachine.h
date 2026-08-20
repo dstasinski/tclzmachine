@@ -76,6 +76,15 @@ struct ZMachine {
     /* Per-session pseudo-random generator state used by the random opcode. */
     uint32_t random_state;
 
+    /*
+     * Minimal presentation state retained by the text-only frontend.
+     *
+     * Z-machine windows 1 and above are presentation/status regions.  The IRC
+     * runtime does not expose their cursor or layout data, so text written to a
+     * nonzero window is discarded rather than mixed into narrative output.
+     */
+    uint8_t current_window;
+
     /* Canonical output and one queued line of player input. */
     Tcl_DString output;
     Tcl_DString pending_input;
