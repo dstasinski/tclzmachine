@@ -21,40 +21,105 @@ The intended VM compatibility target is:
 
 V6 is excluded because its presentation model is unusually screen-oriented and does not fit the project's IRC/text-only purpose. V7 and V8 are retained because their VM model is useful for later, larger text-oriented Z-code games while remaining practical for a text-only frontend.
 
-The interpreter will not expose graphics, cursor positioning, mouse input, sound, fonts, colors, menus, or rich terminal layout. Where a supported story uses presentation opcodes that can safely degrade to plain text, the runtime should preserve meaningful textual output and discard presentation details.
+The interpreter does not expose graphics, cursor positioning, mouse input, sound, fonts, colors, menus, or rich terminal layout. Where a supported story uses presentation opcodes that can safely degrade to plain text, the runtime should preserve meaningful textual output and discard presentation details.
 
 ## Current status
 
-This repository is a starter implementation. It provides:
+The runtime now contains a working execution core rather than only starter scaffolding. Implemented areas include:
 
-- a Tcl 8.6 loadable C extension
+- Tcl 8.6 loadable C extension
 - independent named game sessions
 - Z-machine story-file loading
 - header parsing for V1-V5, V7, and V8
 - explicit rejection of V6
-- version-specific story-length scaling
-- version-specific packed routine/string address decoding
+- version-specific story-length scaling and packed-address decoding
 - V7 routine and string offset support
-- per-session memory, program counter, stack, input, and output state
-- Tcl commands for creating, querying, using, and destroying sessions
-- a placeholder execution loop ready for opcode implementation
-- focused unit tests for version/layout rules
-- CMake build and install support
+- per-session story memory, program counter, evaluation stack, call frames, random state, input, and output
+- instruction decoding for LONG, SHORT, VARIABLE, and V5+ EXTENDED forms
+- variable, local, global, stack, store, and branch semantics
+- routine calls and returns
+- arithmetic, logical, memory, control-flow, object, attribute, and property opcodes used by current compatibility tests
+- Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
+- cooperative `read` suspension/resumption
+- dictionary lookup and parse-buffer tokenization
+- restart, verify, random, scan-table, argument-count, and related compatibility behavior
+- optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
+- focused CTest coverage for decoder, state, object, text, input, execution, property, and wrapping behavior
+- manual real-story compatibility probes
 
-It does **not yet execute Z-machine instructions**.
+### Real-game compatibility reached so far
 
-## Planned Tcl API
+An official Version 3 Zork I story (Revision 88 / serial 840726) has been tested locally through the Tcl API. The runtime successfully boots the story, reaches the input prompt, and preserves state across a multi-turn sequence including:
+
+```text
+look
+open mailbox
+take leaflet
+read leaflet
+inventory
+```
+
+The official story file itself is **not** committed to this repository.
+
+## Tcl API
+
+Load the package and create one independent game session:
 
 ```tcl
 package require tclzmachine
 
 zmachine::create game1 /path/to/zork1.z3
-puts [zmachine::command game1 "look"]
+```
+
+Send one player command. The call resumes the VM and returns when the story asks for another line of input, halts, or encounters an error:
+
+```tcl
+set response [zmachine::command game1 "look"]
+puts $response
+```
+
+Inspect session metadata:
+
+```tcl
 puts [zmachine::info game1]
+```
+
+Configure optional output wrapping. The value is a maximum UTF-8 byte count per returned physical line; `0` disables automatic wrapping and is the default:
+
+```tcl
+zmachine::configure game1 -wordwrap 400
+```
+
+Destroy the session when finished:
+
+```tcl
 zmachine::destroy game1
 ```
 
-The intended behavior of `zmachine::command` is to supply one line of player input, resume execution, collect text output, and return when the VM next requests line input, halts, or encounters an error.
+## IRC-oriented output wrapping
+
+Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command` applies the configured session limit only while returning that text to Tcl.
+
+The wrapper:
+
+- measures limits in UTF-8 bytes rather than characters
+- prefers whitespace boundaries
+- preserves story-supplied newlines
+- does not split inside a UTF-8 code point
+- can hard-wrap a single long word when necessary
+- is disabled by default
+
+This lets an IRC bot choose a conservative payload size while leaving room for the IRC command, target, tags, prefix, and CRLF framing.
+
+Example:
+
+```tcl
+zmachine::configure game1 -wordwrap 380
+
+foreach line [split [zmachine::command game1 "look"] "\n"] {
+    # Send $line through the bot's IRC library.
+}
+```
 
 ## Build
 
@@ -64,7 +129,7 @@ Requirements:
 - CMake 3.16+
 - Tcl 8.6 development headers and library
 
-On Debian/Ubuntu:
+On Debian/Ubuntu/Linux Mint:
 
 ```sh
 sudo apt install build-essential cmake tcl8.6-dev
@@ -73,8 +138,8 @@ sudo apt install build-essential cmake tcl8.6-dev
 Build and test:
 
 ```sh
-cmake -S . -B build
-cmake --build build
+cmake -S . -B build -DTCLZMACHINE_BUILD_TESTS=ON
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
@@ -84,24 +149,69 @@ Install:
 sudo cmake --install build
 ```
 
-## Implementation roadmap
+## Real-story compatibility probes
 
-1. Instruction decoder for long, short, variable and extended forms, with version-gated opcode dispatch.
-2. Operand loading, variable semantics, stores and branches.
-3. Evaluation stack and routine call frames.
-4. Memory access helpers enforcing dynamic/static/high-memory rules.
-5. Z-string, abbreviation, ZSCII and Unicode decoding needed for text output.
-6. Core arithmetic, logical, memory and control-flow opcodes.
-7. Object tables and property operations for both V1-V3 and V4+ layouts.
-8. Dictionary lookup, lexical analysis and tokenization.
-9. Line input and `read` suspension/resumption for the Tcl request/response model.
-10. Text-oriented handling of V4+ window/status opcodes without exposing cursor/layout data.
-11. Quetzal save/restore and restart behavior.
-12. Compatibility testing against representative V1-V5, V7 and V8 story files.
+Official Infocom story files are copyrighted and must not be added to this repository. Local copies can be tested with the supplied Tcl probes.
 
-## Version-dependent rules already isolated
+Single command:
 
-`src/zmachine_version.c` contains the compatibility rules that should not be scattered through the opcode engine. In particular:
+```sh
+tclsh tests/probe_story.tcl \
+    ./build/tclzmachine.so \
+    /path/to/story.z3 \
+    look
+```
+
+Multiple commands in one persistent session:
+
+```sh
+tclsh tests/probe_session.tcl \
+    ./build/tclzmachine.so \
+    /path/to/story.z3 \
+    "look" \
+    "open mailbox" \
+    "take leaflet" \
+    "inventory"
+```
+
+When a story reaches an unimplemented opcode, the probe prints the VM diagnostic and session state so compatibility work can proceed from the exact failing instruction rather than by guessing.
+
+## Project test game
+
+The first-release test plan includes a small purpose-built interactive-fiction fixture owned by this project. Both its human-readable source and compiled Z-machine story files will live under `tests/games/` so normal integration testing does not require an Inform compiler.
+
+Planned layout:
+
+```text
+tests/games/
+├── source/
+│   └── tclzmachine-test.inf
+├── compiled/
+│   ├── tclzmachine-test.z3
+│   └── tclzmachine-test.z5
+└── README.md
+```
+
+The fixture will exercise deterministic text output, input parsing, branches, arithmetic, routine calls, object movement, inventory, properties, state changes, and quit behavior. Official games remain separate real-world compatibility tests.
+
+## Documentation requirement
+
+All project `.c` and `.h` files are expected to be fully commented for the 1.0 release. Comments should explain file purpose, public/internal API contracts, structures and fields, version-specific behavior, non-obvious algorithms, and important Z-machine specification decisions rather than merely restating C syntax.
+
+## Implementation roadmap to 1.0
+
+1. Continue opcode compatibility work using real story files as probes.
+2. Complete text-oriented handling for remaining safe presentation/status opcodes.
+3. Add complete extended ZSCII/Unicode translation support needed by later stories.
+4. Implement save/restore, with Quetzal-compatible persistence as the preferred target.
+5. Add the project-owned compiled Z3/Z5 integration game and scripted conversations.
+6. Broaden compatibility testing across representative V1-V5, V7, and V8 stories.
+7. Complete the source/header documentation audit.
+8. Harden error handling, malformed-story bounds checking, and API documentation.
+
+## Version-dependent rules
+
+`src/zmachine_version.c` centralizes compatibility rules that should not be scattered through the opcode engine. In particular:
 
 - V1-V3 packed addresses use `2P`.
 - V4-V5 packed addresses use `4P`.
@@ -109,18 +219,16 @@ sudo cmake --install build
 - V8 packed addresses use `8P`.
 - Header file-length words scale by 2 for V1-V3, 4 for V4-V5, and 8 for V7-V8.
 
-Keeping these rules centralized is intentional so the VM can share one instruction engine across its supported versions.
+## IRC-oriented architecture
 
-## IRC-oriented design
-
-A game session is intended to remain resident as a native VM instance. Tcl supplies a command and receives only the resulting text:
+A game session remains resident as one native VM instance:
 
 ```text
 IRC/Tcl -> one input line -> VM executes -> next input request -> Tcl string
 ```
 
-IRC framing, flood control, user ownership, persistence policy, and splitting long responses into IRC messages belong in the Tcl/bot layer rather than the VM core.
+IRC framing, flood control, user ownership, authentication, persistence policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
 
 ## Licensing
 
-No third-party Z-machine interpreter source is included. Add an explicit project license before publishing the repository.
+No third-party Z-machine interpreter source is included. The repository's license applies to this independent implementation; official Infocom story data is not part of the project.
