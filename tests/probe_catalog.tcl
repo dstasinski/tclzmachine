@@ -1,7 +1,7 @@
 # probe_catalog.tcl
 #
 # Batch compatibility probe for a directory of locally-owned Z-machine story
-# files.  Official Infocom stories are copyrighted and are intentionally never
+# files. Official Infocom stories are copyrighted and are intentionally never
 # committed to this repository; this script lets a developer exercise a local
 # collection through the same Tcl API an IRC bot will use.
 #
@@ -10,10 +10,10 @@
 #   tclsh tests/probe_catalog.tcl ./build/tclzmachine.so /path/to/stories
 #   tclsh tests/probe_catalog.tcl ./build/tclzmachine.so /path/to/stories look
 #
-# The optional command defaults to "look".  Each story runs in its own fresh
+# The optional command defaults to "look". Each story runs in its own fresh
 # session so a crash/error in one game cannot contaminate another VM instance.
-# The script prints a compact summary first and preserves the exact VM error for
-# failed stories so missing-opcode work can be prioritized by real usage.
+# The script prints a compact summary first and preserves the exact VM/Tcl error
+# for failed stories so missing-opcode work can be prioritized by real usage.
 
 if {$argc < 2 || $argc > 3} {
     puts stderr "usage: probe_catalog.tcl /path/to/tclzmachine.so /path/to/story-directory ?command?"
@@ -73,7 +73,7 @@ foreach story $stories {
     set name [file tail $story]
 
     # Creating the session validates the Z-machine version/header before any
-    # bytecode executes.  Version 6 is an intentional unsupported case rather
+    # bytecode executes. Version 6 is an intentional unsupported case rather
     # than a compatibility regression, so report it separately as SKIP.
     if {[catch {zmachine::create $session $story} err]} {
         if {[string match {*Version 6*intentionally unsupported*} $err]} {
@@ -88,11 +88,33 @@ foreach story $stories {
     }
 
     set before [zmachine::info $session]
-    if {[catch {zmachine::command $session $command} output]} {
+    if {[catch {zmachine::command $session $command} output options]} {
         incr failed
         set after [zmachine::info $session]
-        puts [format "FAIL  %-32s %s" $name $output]
-        lappend failures [list $name $output $after]
+
+        # Some Tcl C APIs can return TCL_ERROR without setting a textual result.
+        # Preserve Tcl's structured diagnostic fields in that case so the next
+        # compatibility fix has something concrete to investigate.
+        set detail $output
+        if {$detail eq ""} {
+            set pieces {}
+            if {[dict exists $options -errorcode]} {
+                lappend pieces "errorCode=[dict get $options -errorcode]"
+            }
+            if {[dict exists $options -errorinfo]} {
+                set ei [string trim [dict get $options -errorinfo]]
+                if {$ei ne ""} {
+                    lappend pieces "errorInfo=$ei"
+                }
+            }
+            set detail [join $pieces {; }]
+            if {$detail eq ""} {
+                set detail "TCL_ERROR with no result or diagnostic"
+            }
+        }
+
+        puts [format "FAIL  %-32s %s" $name $detail]
+        lappend failures [list $name $detail $after]
         zmachine::destroy $session
         continue
     }
