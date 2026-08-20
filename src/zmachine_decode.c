@@ -1,15 +1,30 @@
+/*
+ * zmachine_decode.c
+ *
+ * Byte-level decoder for Z-machine instructions.
+ *
+ * The decoder recognizes LONG, SHORT, VARIABLE, and V5+ EXTENDED encodings,
+ * extracts operand type information, and reads raw operand fields.  It stops
+ * exactly at the end of the operand list so the executor can subsequently
+ * interpret opcode-specific store variables, branch data, or inline Z-text.
+ */
+
 #include "zmachine_decode.h"
 
 #include <stdio.h>
 #include <string.h>
 
+/* Copy one decoder diagnostic into the caller-provided buffer when available. */
 static void decode_error(char *error, size_t error_size, const char *message)
 {
-    if (error && error_size > 0U) {
+    if (error && error_size > 0U)
         snprintf(error, error_size, "%s", message);
-    }
 }
 
+/*
+ * Read one byte from story memory and advance the local decoder cursor.
+ * Return 0 rather than reading beyond the supplied story image.
+ */
 static int read_u8(const uint8_t *memory,
                    size_t memory_size,
                    uint32_t *pc,
@@ -27,6 +42,7 @@ static int read_u8(const uint8_t *memory,
     return 1;
 }
 
+/* Read one big-endian 16-bit operand and advance the decoder cursor twice. */
 static int read_u16(const uint8_t *memory,
                     size_t memory_size,
                     uint32_t *pc,
@@ -38,14 +54,20 @@ static int read_u16(const uint8_t *memory,
     uint8_t lo;
 
     if (!read_u8(memory, memory_size, pc, &hi, error, error_size) ||
-        !read_u8(memory, memory_size, pc, &lo, error, error_size)) {
+        !read_u8(memory, memory_size, pc, &lo, error, error_size))
         return 0;
-    }
 
     *value = (uint16_t)(((uint16_t)hi << 8) | lo);
     return 1;
 }
 
+/*
+ * Append one decoded operand type to the temporary type list.
+ *
+ * An OMITTED code ends the logical operand list.  The standard does not permit
+ * a later non-omitted operand in the same type-byte sequence, so detecting one
+ * here catches malformed instructions before any operand bytes are consumed.
+ */
 static int append_type(ZMachineOperandType type,
                        ZMachineOperandType *types,
                        uint8_t *count,
@@ -74,6 +96,10 @@ static int append_type(ZMachineOperandType type,
     return 1;
 }
 
+/*
+ * Decode the four two-bit operand type fields in one type byte, most
+ * significant field first, matching their order in the instruction stream.
+ */
 static int decode_type_byte(uint8_t byte,
                             ZMachineOperandType *types,
                             uint8_t *count,
@@ -88,14 +114,14 @@ static int decode_type_byte(uint8_t byte,
             (ZMachineOperandType)((byte >> shift) & 0x03U);
 
         if (!append_type(type, types, count, omitted_seen,
-                         error, error_size)) {
+                         error, error_size))
             return 0;
-        }
     }
 
     return 1;
 }
 
+/* Decode one complete opcode and its raw operands from story memory. */
 int zmachine_decode_instruction(const uint8_t *memory,
                                 size_t memory_size,
                                 uint8_t version,
@@ -111,9 +137,8 @@ int zmachine_decode_instruction(const uint8_t *memory,
     uint8_t i;
     int omitted_seen = 0;
 
-    if (error && error_size > 0U) {
+    if (error && error_size > 0U)
         error[0] = '\0';
-    }
 
     if (!memory || !instruction) {
         decode_error(error, error_size, "invalid decoder argument");
@@ -123,12 +148,16 @@ int zmachine_decode_instruction(const uint8_t *memory,
     memset(instruction, 0, sizeof(*instruction));
     instruction->address = pc;
 
-    if (!read_u8(memory, memory_size, &pc, &opcode, error, error_size)) {
+    if (!read_u8(memory, memory_size, &pc, &opcode, error, error_size))
         return 0;
-    }
 
     instruction->opcode_byte = opcode;
 
+    /*
+     * In V5+, 0xBE is not a SHORT-form 0OP instruction; it is the prefix for
+     * the extended opcode table.  The following byte is the EXT opcode number
+     * and the next byte is its operand-type descriptor.
+     */
     if (opcode == 0xBEU && version >= 5U) {
         instruction->form = ZM_FORM_EXTENDED;
         instruction->operand_count = ZM_OPERANDS_VAR;
@@ -136,15 +165,18 @@ int zmachine_decode_instruction(const uint8_t *memory,
         if (!read_u8(memory, memory_size, &pc,
                      &instruction->opcode_number, error, error_size) ||
             !read_u8(memory, memory_size, &pc,
-                     &type_byte, error, error_size)) {
+                     &type_byte, error, error_size))
             return 0;
-        }
 
         instruction->type_byte_count = 1U;
         if (!decode_type_byte(type_byte, types, &type_count, &omitted_seen,
-                              error, error_size)) {
+                              error, error_size))
             return 0;
-        }
+
+    /*
+     * VARIABLE form begins with binary 11xxxxxx.  Bit 5 selects VAR versus
+     * variable-form 2OP; the low five bits carry the opcode number.
+     */
     } else if ((opcode & 0xC0U) == 0xC0U) {
         instruction->form = ZM_FORM_VARIABLE;
         instruction->opcode_number = opcode & 0x1FU;
@@ -152,34 +184,35 @@ int zmachine_decode_instruction(const uint8_t *memory,
             (opcode & 0x20U) ? ZM_OPERANDS_VAR : ZM_OPERANDS_2OP;
 
         if (!read_u8(memory, memory_size, &pc, &type_byte,
-                     error, error_size)) {
+                     error, error_size))
             return 0;
-        }
 
         instruction->type_byte_count = 1U;
         if (!decode_type_byte(type_byte, types, &type_count, &omitted_seen,
-                              error, error_size)) {
+                              error, error_size))
             return 0;
-        }
 
         /*
-         * Only VAR:12 call_vs2 and VAR:26 call_vn2 use a second type byte.
-         * Variable-form encodings of 2OP opcodes never do.
+         * Only VAR:12 call_vs2 and VAR:26 call_vn2 use a second type byte,
+         * allowing up to eight operands.  Variable-form 2OP opcodes never do.
          */
         if (instruction->operand_count == ZM_OPERANDS_VAR &&
             (instruction->opcode_number == 12U ||
              instruction->opcode_number == 26U)) {
             if (!read_u8(memory, memory_size, &pc, &type_byte,
-                         error, error_size)) {
+                         error, error_size))
                 return 0;
-            }
 
             instruction->type_byte_count = 2U;
             if (!decode_type_byte(type_byte, types, &type_count,
-                                  &omitted_seen, error, error_size)) {
+                                  &omitted_seen, error, error_size))
                 return 0;
-            }
         }
+
+    /*
+     * SHORT form begins with binary 10xxxxxx.  Bits 5..4 contain one operand
+     * type; OMITTED means the instruction belongs to the 0OP table.
+     */
     } else if ((opcode & 0xC0U) == 0x80U) {
         ZMachineOperandType type =
             (ZMachineOperandType)((opcode >> 4) & 0x03U);
@@ -193,6 +226,11 @@ int zmachine_decode_instruction(const uint8_t *memory,
             instruction->operand_count = ZM_OPERANDS_1OP;
             types[type_count++] = type;
         }
+
+    /*
+     * LONG form is everything else.  It always has two operands; bits 6 and 5
+     * choose VARIABLE versus SMALL CONSTANT independently for operands 1 and 2.
+     */
     } else {
         instruction->form = ZM_FORM_LONG;
         instruction->operand_count = ZM_OPERANDS_2OP;
@@ -209,26 +247,31 @@ int zmachine_decode_instruction(const uint8_t *memory,
     instruction->operands_address = pc;
     instruction->operand_count_actual = type_count;
 
+    /*
+     * Read raw operand fields in source order.  LARGE CONSTANT consumes two
+     * bytes; SMALL CONSTANT and VARIABLE both consume one.  Variable operands
+     * remain unresolved variable numbers until the execution layer evaluates
+     * them left-to-right.
+     */
     for (i = 0U; i < type_count; ++i) {
         instruction->operands[i].type = types[i];
 
         if (types[i] == ZM_OPERAND_LARGE_CONSTANT) {
             if (!read_u16(memory, memory_size, &pc,
                           &instruction->operands[i].value,
-                          error, error_size)) {
+                          error, error_size))
                 return 0;
-            }
         } else {
             uint8_t value;
 
             if (!read_u8(memory, memory_size, &pc, &value,
-                         error, error_size)) {
+                         error, error_size))
                 return 0;
-            }
             instruction->operands[i].value = value;
         }
     }
 
+    /* Opcode-specific trailing data begins at next_pc. */
     instruction->next_pc = pc;
     return 1;
 }
