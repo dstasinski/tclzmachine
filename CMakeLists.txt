@@ -12,6 +12,7 @@ find_package(TCL 8.6 REQUIRED)
 set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
     src/zmachine_decode.c
+    src/zmachine_dispatch.c
     src/zmachine_exec.c
     src/zmachine_input.c
     src/zmachine_object.c
@@ -20,6 +21,16 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_text.c
     src/zmachine_version.c
     src/zmachine_wrap.c
+)
+
+#
+# zmachine_dispatch.c owns the public zmachine_step() entry point so it can
+# consume presentation-only instructions before delegating ordinary VM work.
+# Rename the implementation in zmachine_exec.c at compile time rather than
+# duplicating or weakening the executor's public API contract.
+#
+set_source_files_properties(src/zmachine_exec.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core"
 )
 
 add_library(tclzmachine SHARED
@@ -100,6 +111,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(wrap-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(wrap-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME output-wrap COMMAND wrap-test)
+
+    add_executable(presentation-test tests/presentation.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(presentation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(presentation-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME presentation-opcodes COMMAND presentation-test)
 
     add_test(NAME package-smoke COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>)
 endif()
