@@ -3,7 +3,7 @@
  *
  * Story loading, per-session lifetime management, the cooperative execution
  * loop, and a small set of interpreter-level opcodes which are best handled
- * outside the ordinary instruction executor.  The run loop stops whenever a
+ * outside the ordinary instruction executor. The run loop stops whenever a
  * story asks for line input so Tcl/IRC code never blocks on a terminal.
  */
 
@@ -476,6 +476,16 @@ static int handle_core_opcode(ZMachine *vm, int *handled)
     }
 
     if (instruction.operand_count != ZM_OPERANDS_VAR)
+        return TCL_OK;
+
+    /*
+     * Only resolve operands for opcodes owned by this handler. Variable
+     * operands can pop stack variable 0, so resolving an unhandled opcode here
+     * and then again in zmachine_step() would corrupt the evaluation stack.
+     */
+    if (instruction.opcode_number != 7U &&
+        instruction.opcode_number != 23U &&
+        instruction.opcode_number != 31U)
         return TCL_OK;
 
     if (zmachine_resolve_operands(vm, &instruction, values,
