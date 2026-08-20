@@ -67,20 +67,35 @@ int zmachine_wrap_output(const char *text,
         while (remaining > max_bytes) {
             size_t limit = pos + max_bytes;
             size_t split = utf8_safe_split(text, pos, limit);
-            size_t whitespace = split;
+            size_t whitespace;
 
-            /* Prefer the last whitespace within the byte limit. */
-            while (whitespace > pos &&
-                   !is_wrap_space((unsigned char)text[whitespace - 1U])) {
-                --whitespace;
+            /*
+             * Prefer the last whitespace reachable within the byte limit.
+             *
+             * A special case is needed when a word itself occupies exactly
+             * max_bytes and the following byte is whitespace.  That boundary
+             * whitespace is not part of the emitted line, but consuming it
+             * prevents the next wrapped line from beginning with a space.
+             */
+            if (split < line_end &&
+                is_wrap_space((unsigned char)text[split])) {
+                whitespace = split + 1U;
+            } else {
+                whitespace = split;
+                while (whitespace > pos &&
+                       !is_wrap_space((unsigned char)text[whitespace - 1U])) {
+                    --whitespace;
+                }
             }
 
             if (whitespace > pos) {
                 size_t out_end = whitespace;
+
                 while (out_end > pos &&
                        is_wrap_space((unsigned char)text[out_end - 1U])) {
                     --out_end;
                 }
+
                 Tcl_DStringAppend(result, text + pos, (int)(out_end - pos));
                 Tcl_DStringAppend(result, "\n", 1);
 
@@ -98,6 +113,7 @@ int zmachine_wrap_output(const char *text,
                         ++split;
                     }
                 }
+
                 Tcl_DStringAppend(result, text + pos, (int)(split - pos));
                 Tcl_DStringAppend(result, "\n", 1);
                 pos = split;
