@@ -23,6 +23,7 @@ Include "VerbLib";
 Object TestLab "Test Lab"
   with description
       "You are in a small test laboratory. A doorway leads north.",
+       n_to LabDoor,
   has light;
 
 Object -> Lamp "brass lamp"
