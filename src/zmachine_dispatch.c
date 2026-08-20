@@ -14,8 +14,10 @@
  * This wrapper also supplies a conservative text-only policy for read_char.
  * A queued Tcl command represents one complete line and must not be consumed
  * merely because an Infocom story displays a "press any key" pause during
- * startup. Such single-character reads therefore receive ZSCII 13 (Enter),
+ * startup. Such single-character reads therefore receive a printable space,
  * while the queued line remains available for the next ordinary read opcode.
+ * A printable character is used instead of carriage return because some
+ * stories explicitly reject Enter and immediately repeat read_char.
  *
  * Keeping this policy in a separate translation unit prevents screen-specific
  * compatibility decisions from becoming mixed into object, arithmetic,
@@ -48,12 +50,14 @@ static int dispatch_error(ZMachine *vm, const char *message)
  * stream-oriented text frontend.
  *
  * VAR:10 split_window changes only the terminal window layout.
+ * VAR:11 set_window selects which terminal window receives subsequent output.
  * VAR:13 erase_window changes only screen contents/cursor placement.
  * VAR:17 set_text_style changes visual style only.
  * VAR:18 buffer_mode controls terminal-side line buffering/word wrapping.
  *
- * tclzmachine performs optional wrapping at the Tcl output boundary instead,
- * so none of these instructions should modify canonical VM text output.
+ * tclzmachine has one canonical output stream and performs optional wrapping
+ * at the Tcl output boundary, so none of these instructions should modify the
+ * story text returned to the caller.
  */
 static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
@@ -62,7 +66,8 @@ static int is_text_only_noop(const ZMachine *vm,
         instruction->operand_count != ZM_OPERANDS_VAR)
         return 0;
 
-    if (instruction->opcode_number == 10U)
+    if (instruction->opcode_number == 10U ||
+        instruction->opcode_number == 11U)
         return vm->version >= 3U;
 
     if (vm->version < 4U)
@@ -78,9 +83,9 @@ static int is_text_only_noop(const ZMachine *vm,
  *
  * The opcode stores one input character. Because the public Tcl API queues a
  * complete line command, consuming one byte here would corrupt that command
- * before the story reaches its next line-oriented read. Returning carriage
- * return is a deterministic, harmless way to satisfy classic "press a key"
- * pauses while preserving the queued line for the parser.
+ * before the story reaches its next line-oriented read. A printable space is
+ * a deterministic synthetic key suitable for classic "press any key" pauses
+ * and avoids loops in stories which reject carriage return as a valid key.
  */
 static int handle_read_char(ZMachine *vm,
                             const ZMachineInstruction *instruction,
@@ -110,7 +115,7 @@ static int handle_read_char(ZMachine *vm,
         return dispatch_error(vm, "truncated read_char store variable");
 
     store_variable = vm->memory[instruction->next_pc];
-    if (zmachine_variable_write(vm, store_variable, 0, 13U) != TCL_OK)
+    if (zmachine_variable_write(vm, store_variable, 0, 32U) != TCL_OK)
         return TCL_ERROR;
 
     vm->pc = instruction->next_pc + 1U;
