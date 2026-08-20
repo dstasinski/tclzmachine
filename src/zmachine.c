@@ -347,11 +347,18 @@ int zmachine_supply_input(ZMachine *vm, const char *line)
  * Handle the line-oriented read opcode at the cooperative run-loop boundary.
  * This is deliberately outside the ordinary executor because an IRC runtime
  * must suspend rather than blocking while waiting for a terminal keyboard.
+ *
+ * V5+ permits the parse buffer to be zero, which suppresses lexical analysis.
+ * Some Infocom code encodes that case by omitting the trailing parse operand
+ * entirely. For compatibility, a one-operand V5+ read is treated exactly as
+ * though an explicit zero parse-buffer operand had been supplied.
  */
 static int handle_read_opcode(ZMachine *vm, int *handled)
 {
     ZMachineInstruction instruction;
     uint16_t values[ZM_MAX_OPERANDS];
+    uint16_t text_buffer;
+    uint16_t parse_buffer;
     uint16_t terminator = 13U;
     char decode_error[128];
     uint32_t next_pc;
@@ -375,14 +382,20 @@ static int handle_read_opcode(ZMachine *vm, int *handled)
         return TCL_OK;
     }
 
-    if (instruction.operand_count_actual < 2U) {
-        set_error(vm, "read opcode is missing text or parse buffer operands");
+    if (instruction.operand_count_actual < 1U ||
+        (vm->version <= 4U && instruction.operand_count_actual < 2U)) {
+        set_error(vm, "read opcode is missing required buffer operands");
         return TCL_ERROR;
     }
+
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
-    if (zmachine_input_read_line(vm, values[0], values[1], &terminator) != TCL_OK) {
+
+    text_buffer = values[0];
+    parse_buffer = instruction.operand_count_actual >= 2U ? values[1] : 0U;
+
+    if (zmachine_input_read_line(vm, text_buffer, parse_buffer, &terminator) != TCL_OK) {
         set_error(vm, "unable to store or tokenize line input");
         return TCL_ERROR;
     }
