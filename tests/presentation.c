@@ -3,9 +3,9 @@
  *
  * Regression tests for presentation-oriented Z-machine behavior adapted to
  * the stream-oriented Tcl/IRC frontend. These tests cover layout no-ops,
- * cooperative character input, output-stream bookkeeping, print_table
- * conversion to plain text, indirect-variable semantics, and narrow legacy
- * compatibility cases handled by the presentation dispatcher.
+ * cooperative character input, output-stream bookkeeping and routing,
+ * print_table conversion to plain text, indirect-variable semantics, and
+ * narrow legacy compatibility cases handled by the presentation dispatcher.
  */
 
 #include "tclzmachine.h"
@@ -200,6 +200,85 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x5EU);
     assert(read_global(&vm, 0x13U) == 0U);
+
+    free_vm(&vm);
+
+    /*
+     * Stream 3 captures ZSCII in dynamic memory and suppresses stream 1 while
+     * active. Nested captures must resume the previous table when the inner
+     * stream closes, and explicit stream-1 selection remains independent.
+     */
+    init_vm(&vm, 5U, 512U);
+    vm.pc = 0x20U;
+
+    vm.memory[0x20] = 0xF3U;
+    vm.memory[0x21] = 0x4FU;
+    vm.memory[0x22] = 3U;
+    vm.memory[0x23] = 0x00U;
+    vm.memory[0x24] = 0x80U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x25U && vm.stream3_depth == 1U);
+    zmachine_output_append(&vm, "A", 1U);
+
+    vm.memory[0x25] = 0xF3U;
+    vm.memory[0x26] = 0x4FU;
+    vm.memory[0x27] = 3U;
+    vm.memory[0x28] = 0x00U;
+    vm.memory[0x29] = 0x90U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x2AU && vm.stream3_depth == 2U);
+    zmachine_output_append(&vm, "B\n", 2U);
+
+    vm.memory[0x2A] = 0xF3U;
+    vm.memory[0x2B] = 0x3FU;
+    vm.memory[0x2C] = 0xFFU;
+    vm.memory[0x2D] = 0xFDU;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x2EU && vm.stream3_depth == 1U);
+    zmachine_output_append(&vm, "C", 1U);
+
+    vm.memory[0x2E] = 0xF3U;
+    vm.memory[0x2F] = 0x3FU;
+    vm.memory[0x30] = 0xFFU;
+    vm.memory[0x31] = 0xFDU;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x32U && vm.stream3_depth == 0U);
+
+    assert(Tcl_DStringLength(&vm.output) == 0);
+    assert(vm.memory[0x80] == 0U && vm.memory[0x81] == 2U);
+    assert(vm.memory[0x82] == (uint8_t)'A');
+    assert(vm.memory[0x83] == (uint8_t)'C');
+    assert(vm.memory[0x90] == 0U && vm.memory[0x91] == 2U);
+    assert(vm.memory[0x92] == (uint8_t)'B');
+    assert(vm.memory[0x93] == 13U);
+
+    zmachine_output_append(&vm, "D\n", 2U);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "D\n") == 0);
+
+    vm.memory[0x32] = 0xF3U;
+    vm.memory[0x33] = 0x3FU;
+    vm.memory[0x34] = 0xFFU;
+    vm.memory[0x35] = 0xFFU;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x36U && vm.output_stream1_enabled == 0);
+    zmachine_output_append(&vm, "E", 1U);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "D\n") == 0);
+
+    vm.memory[0x36] = 0xF3U;
+    vm.memory[0x37] = 0x7FU;
+    vm.memory[0x38] = 1U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x39U && vm.output_stream1_enabled == 1);
+    zmachine_output_append(&vm, "F", 1U);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "D\nF") == 0);
+
+    vm.output_stream1_enabled = 0;
+    vm.stream3_depth = 1U;
+    vm.stream3_tables[0] = 0x80U;
+    assert(zmachine_reset(&vm) == TCL_OK);
+    assert(vm.output_stream1_enabled == 1);
+    assert(vm.stream3_depth == 0U);
+    assert(Tcl_DStringLength(&vm.output) == 0);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
