@@ -11,13 +11,12 @@
  * as text-only no-ops, while all ordinary VM instructions are delegated to
  * the core executor in zmachine_exec.c.
  *
- * This wrapper also supplies a conservative text-only policy for read_char.
- * A queued Tcl command represents one complete line and must not be consumed
- * merely because an Infocom story displays a "press any key" pause during
- * startup. Such single-character reads therefore receive a printable space,
- * while the queued line remains available for the next ordinary read opcode.
- * A printable character is used instead of carriage return because some
- * stories explicitly reject Enter and immediately repeat read_char.
+ * Character input is also adapted here.  VAR:22 read_char is a real input
+ * operation, not a presentation hint, so fabricating a key can trap a story in
+ * a menu loop.  Instead, read_char participates in the same cooperative input
+ * model as line input: with no queued Tcl input the VM enters WAITING_INPUT;
+ * when input is queued, the first byte supplies the character and that queued
+ * item is consumed as a character-input response rather than a line command.
  *
  * Keeping this policy in a separate translation unit prevents screen-specific
  * compatibility decisions from becoming mixed into object, arithmetic,
@@ -49,15 +48,14 @@ static int dispatch_error(ZMachine *vm, const char *message)
  * Return nonzero for presentation opcodes which can safely disappear in a
  * stream-oriented text frontend.
  *
- * VAR:10 split_window changes only the terminal window layout.
- * VAR:11 set_window selects which terminal window receives subsequent output.
+ * VAR:10 split_window and VAR:11 set_window select terminal windows.
  * VAR:13 erase_window changes only screen contents/cursor placement.
+ * VAR:15 set_cursor changes only cursor placement.
  * VAR:17 set_text_style changes visual style only.
  * VAR:18 buffer_mode controls terminal-side line buffering/word wrapping.
  *
- * tclzmachine has one canonical output stream and performs optional wrapping
- * at the Tcl output boundary, so none of these instructions should modify the
- * story text returned to the caller.
+ * tclzmachine performs optional wrapping at the Tcl output boundary instead,
+ * so none of these instructions should modify canonical VM text output.
  */
 static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
@@ -74,25 +72,32 @@ static int is_text_only_noop(const ZMachine *vm,
         return 0;
 
     return instruction->opcode_number == 13U ||
+           instruction->opcode_number == 15U ||
            instruction->opcode_number == 17U ||
            instruction->opcode_number == 18U;
 }
 
 /*
- * Handle VAR:22 read_char in a non-interactive text frontend.
+ * Handle VAR:22 read_char using cooperative Tcl input.
  *
- * The opcode stores one input character. Because the public Tcl API queues a
- * complete line command, consuming one byte here would corrupt that command
- * before the story reaches its next line-oriented read. A printable space is
- * a deterministic synthetic key suitable for classic "press any key" pauses
- * and avoids loops in stories which reject carriage return as a valid key.
+ * A call which reaches read_char without queued input suspends at the opcode
+ * with the PC unchanged.  On the next zmachine::command call, the first byte
+ * of the supplied Tcl string is returned as the ZSCII character.  The entire
+ * queued item is then consumed because it answered a character request, not a
+ * line request.  An empty supplied string represents carriage return.
+ *
+ * Timed read_char operands are not yet implemented; nonzero timeout/routine
+ * operands are rejected rather than silently changing game timing semantics.
  */
 static int handle_read_char(ZMachine *vm,
                             const ZMachineInstruction *instruction,
                             int *handled)
 {
     uint16_t values[ZM_MAX_OPERANDS];
+    uint16_t zscii;
     uint8_t store_variable;
+    const char *input;
+    int input_length;
 
     *handled = 0;
     if (!vm || !instruction || vm->version < 4U ||
@@ -101,8 +106,14 @@ static int handle_read_char(ZMachine *vm,
         return TCL_OK;
 
     *handled = 1;
+
     if (instruction->operand_count_actual < 1U)
         return dispatch_error(vm, "read_char is missing its input-device operand");
+
+    if (!vm->input_available) {
+        vm->state = ZM_STATE_WAITING_INPUT;
+        return TCL_OK;
+    }
 
     if (zmachine_resolve_operands(vm, instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
@@ -111,19 +122,36 @@ static int handle_read_char(ZMachine *vm,
     if (values[0] != 1U)
         return dispatch_error(vm, "read_char requested an unsupported input device");
 
+    if (instruction->operand_count_actual >= 2U && values[1] != 0U)
+        return dispatch_error(vm, "timed read_char is not yet supported");
+    if (instruction->operand_count_actual >= 3U && values[2] != 0U)
+        return dispatch_error(vm, "timed read_char callback is not yet supported");
+
     if ((size_t)instruction->next_pc >= vm->memory_size)
         return dispatch_error(vm, "truncated read_char store variable");
 
+    input = Tcl_DStringValue(&vm->pending_input);
+    input_length = Tcl_DStringLength(&vm->pending_input);
+    if (input_length == 0) {
+        zscii = 13U;
+    } else {
+        unsigned char ch = (unsigned char)input[0];
+        zscii = (ch >= 32U && ch <= 126U) ? (uint16_t)ch : 13U;
+    }
+
     store_variable = vm->memory[instruction->next_pc];
-    if (zmachine_variable_write(vm, store_variable, 0, 32U) != TCL_OK)
+    if (zmachine_variable_write(vm, store_variable, 0, zscii) != TCL_OK)
         return TCL_ERROR;
 
+    Tcl_DStringSetLength(&vm->pending_input, 0);
+    vm->input_available = 0;
     vm->pc = instruction->next_pc + 1U;
     return TCL_OK;
 }
 
 /*
- * Execute one instruction, intercepting presentation-only operations first.
+ * Execute one instruction, intercepting text-only presentation and character
+ * input policy before ordinary opcode dispatch.
  *
  * Even a discarded presentation instruction must have its operands evaluated:
  * a variable operand may name stack variable 0, whose read has the observable
