@@ -1,15 +1,15 @@
 /*
  * zmachine_text.c
  *
- * Z-character, abbreviation, alphabet, and ZSCII decoding for canonical text
- * output.
+ * Z-character, abbreviation, alphabet, ZSCII, and Unicode decoding for
+ * canonical text output.
  *
- * Z-machine text is stored three 5-bit Z-characters per 16-bit word.  The high
- * bit of the final word terminates a string.  Depending on story version,
+ * Z-machine text is stored three 5-bit Z-characters per 16-bit word. The high
+ * bit of the final word terminates a string. Depending on story version,
  * Z-characters can select alphabets, introduce abbreviations, encode line
- * breaks, or begin a 10-bit ZSCII escape.  This module decodes those constructs
- * into UTF-8 and appends only canonical text to vm->output; terminal layout and
- * IRC wrapping remain presentation-layer concerns.
+ * breaks, or begin a 10-bit ZSCII escape. This module decodes those constructs
+ * into UTF-8 for stream 1 while preserving original ZSCII bytes for memory
+ * output stream 3.
  */
 
 #include "tclzmachine.h"
@@ -21,6 +21,29 @@
 
 #define ZM_TEXT_MAX_WORDS 65536U
 #define ZM_TEXT_MAX_RECURSION 8U
+#define ZM_ZSCII_EXTRA_FIRST 155U
+#define ZM_ZSCII_EXTRA_LAST 251U
+#define ZM_ZSCII_EXTRA_COUNT 97U
+
+/*
+ * Standard default Unicode table for ZSCII 155..223. Codes 224..251 are not
+ * defined by the default table. V1-V4 always use this table; V5+ use it unless
+ * header-extension word 3 selects a story-provided translation table.
+ */
+static const uint16_t default_unicode_table[] = {
+    0x00e4U, 0x00f6U, 0x00fcU, 0x00c4U, 0x00d6U, 0x00dcU,
+    0x00dfU, 0x00bbU, 0x00abU, 0x00ebU, 0x00efU, 0x00ffU,
+    0x00cbU, 0x00cfU, 0x00e1U, 0x00e9U, 0x00edU, 0x00f3U,
+    0x00faU, 0x00fdU, 0x00c1U, 0x00c9U, 0x00cdU, 0x00d3U,
+    0x00daU, 0x00ddU, 0x00e0U, 0x00e8U, 0x00ecU, 0x00f2U,
+    0x00f9U, 0x00c0U, 0x00c8U, 0x00ccU, 0x00d2U, 0x00d9U,
+    0x00e2U, 0x00eaU, 0x00eeU, 0x00f4U, 0x00fbU, 0x00c2U,
+    0x00caU, 0x00ceU, 0x00d4U, 0x00dbU, 0x00e5U, 0x00c5U,
+    0x00f8U, 0x00d8U, 0x00e3U, 0x00f1U, 0x00f5U, 0x00c3U,
+    0x00d1U, 0x00d5U, 0x00e6U, 0x00c6U, 0x00e7U, 0x00c7U,
+    0x00feU, 0x00f0U, 0x00deU, 0x00d0U, 0x00a3U, 0x0153U,
+    0x0152U, 0x00a1U, 0x00bfU
+};
 
 static void text_error(ZMachine *vm, const char *message)
 {
@@ -52,6 +75,7 @@ static int read_word(const ZMachine *vm, uint32_t address, uint16_t *value)
     return TCL_OK;
 }
 
+/* Append one BMP Unicode code point as UTF-8 to the canonical output route. */
 static int append_utf8(ZMachine *vm, uint16_t codepoint)
 {
     char out[3];
@@ -75,35 +99,178 @@ static int append_utf8(ZMachine *vm, uint16_t codepoint)
     }
 
     zmachine_output_append(vm, out, (size_t)len);
+    return vm->state == ZM_STATE_ERROR ? TCL_ERROR : TCL_OK;
+}
+
+/*
+ * Store one already-validated ZSCII output byte in the innermost memory stream.
+ *
+ * Stream 3 contains ZSCII bytes, not the UTF-8 representation used by the Tcl
+ * frontend. Keeping this routing here lets an accented/custom character remain
+ * e.g. byte 155 in story memory even though stream 1 renders it as Unicode.
+ */
+static int append_stream3_zscii(ZMachine *vm, uint8_t zscii)
+{
+    size_t table;
+    size_t address;
+    uint16_t count;
+
+    if (!vm || !vm->memory || vm->stream3_depth == 0U)
+        return TCL_ERROR;
+
+    table = vm->stream3_tables[vm->stream3_depth - 1U];
+    if (table + 1U >= vm->memory_size ||
+        table + 1U >= (size_t)vm->static_memory_addr) {
+        text_error(vm, "output stream 3 table is outside dynamic memory");
+        return TCL_ERROR;
+    }
+
+    count = (uint16_t)(((uint16_t)vm->memory[table] << 8) |
+                       vm->memory[table + 1U]);
+    if (count == 0xffffU) {
+        text_error(vm, "output stream 3 character count overflow");
+        return TCL_ERROR;
+    }
+
+    address = table + 2U + (size_t)count;
+    if (address >= vm->memory_size ||
+        address >= (size_t)vm->static_memory_addr) {
+        text_error(vm, "output stream 3 write exceeds dynamic memory");
+        return TCL_ERROR;
+    }
+
+    vm->memory[address] = zscii;
+    ++count;
+    vm->memory[table] = (uint8_t)(count >> 8);
+    vm->memory[table + 1U] = (uint8_t)count;
+    return TCL_OK;
+}
+
+/* Return nonzero when a BMP value is suitable for direct UTF-8 rendering. */
+static int unicode_is_printable(uint16_t codepoint)
+{
+    if (codepoint <= 0x001fU ||
+        (codepoint >= 0x007fU && codepoint <= 0x009fU))
+        return 0;
+
+    /* UTF-16 surrogate code units are not Unicode scalar values. */
+    if (codepoint >= 0xd800U && codepoint <= 0xdfffU)
+        return 0;
+
+    return 1;
+}
+
+/*
+ * Resolve one extra ZSCII code through the active Unicode translation table.
+ *
+ * When *defined is false, the code is outside the table selected by the story.
+ * Such illegal story output is rendered safely as '?' rather than permitting
+ * arbitrary control data to escape to the Tcl/IRC frontend.
+ */
+static int extra_zscii_unicode(ZMachine *vm,
+                               uint16_t zscii,
+                               uint16_t *unicode,
+                               int *defined)
+{
+    size_t index;
+    uint16_t table_address = 0U;
+    uint16_t extension_words = 0U;
+    uint8_t count = 0U;
+
+    if (!vm || !unicode || !defined ||
+        zscii < ZM_ZSCII_EXTRA_FIRST || zscii > ZM_ZSCII_EXTRA_LAST)
+        return TCL_ERROR;
+
+    index = (size_t)(zscii - ZM_ZSCII_EXTRA_FIRST);
+    *defined = 0;
+    *unicode = (uint16_t)'?';
+
+    if (vm->version >= 5U && vm->header_extension_addr != 0U) {
+        if (read_word(vm, vm->header_extension_addr, &extension_words) != TCL_OK) {
+            text_error(vm, "invalid Z-machine header extension table");
+            return TCL_ERROR;
+        }
+
+        if (extension_words >= 3U) {
+            if (read_word(vm, (uint32_t)vm->header_extension_addr + 6U,
+                          &table_address) != TCL_OK) {
+                text_error(vm, "truncated Unicode translation table pointer");
+                return TCL_ERROR;
+            }
+        }
+    }
+
+    if (vm->version <= 4U || table_address == 0U) {
+        if (index < sizeof(default_unicode_table) /
+                        sizeof(default_unicode_table[0])) {
+            *defined = 1;
+            *unicode = default_unicode_table[index];
+        }
+        return TCL_OK;
+    }
+
+    if (read_byte(vm, table_address, &count) != TCL_OK) {
+        text_error(vm, "invalid Unicode translation table address");
+        return TCL_ERROR;
+    }
+    if (count > ZM_ZSCII_EXTRA_COUNT) {
+        text_error(vm, "Unicode translation table defines too many characters");
+        return TCL_ERROR;
+    }
+    if (index >= count)
+        return TCL_OK;
+
+    if (read_word(vm, (uint32_t)table_address + 1U + (uint32_t)(2U * index),
+                  unicode) != TCL_OK) {
+        text_error(vm, "truncated Unicode translation table");
+        return TCL_ERROR;
+    }
+
+    *defined = 1;
+    if (!unicode_is_printable(*unicode))
+        *unicode = (uint16_t)'?';
     return TCL_OK;
 }
 
 int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii)
 {
+    uint16_t unicode = 0U;
+    int defined = 1;
+    uint8_t stream3_byte;
+
     if (!vm)
         return TCL_ERROR;
 
+    /* ZSCII null has no effect in any output stream. */
     if (zscii == 0U)
         return TCL_OK;
 
+    if (zscii >= ZM_ZSCII_EXTRA_FIRST && zscii <= ZM_ZSCII_EXTRA_LAST) {
+        if (extra_zscii_unicode(vm, zscii, &unicode, &defined) != TCL_OK)
+            return TCL_ERROR;
+    } else if (zscii != 13U && !(zscii >= 32U && zscii <= 126U)) {
+        vm->state = ZM_STATE_ERROR;
+        snprintf(vm->error, sizeof(vm->error),
+                 "invalid or unsupported ZSCII output character %u (0x%02x)",
+                 (unsigned)zscii, (unsigned)(zscii & 0xffU));
+        return TCL_ERROR;
+    }
+
+    /* Memory stream 3 stores original ZSCII, never its UTF-8 encoding. */
+    if (vm->stream3_depth > 0U) {
+        stream3_byte = defined ? (uint8_t)zscii : (uint8_t)'?';
+        return append_stream3_zscii(vm, stream3_byte);
+    }
+
     if (zscii == 13U) {
         zmachine_output_append(vm, "\n", 1U);
-        return TCL_OK;
+        return vm->state == ZM_STATE_ERROR ? TCL_ERROR : TCL_OK;
     }
 
     if (zscii >= 32U && zscii <= 126U)
         return append_utf8(vm, zscii);
 
-    if (zscii >= 155U && zscii <= 251U) {
-        zmachine_output_append(vm, "?", 1U);
-        return TCL_OK;
-    }
-
-    vm->state = ZM_STATE_ERROR;
-    snprintf(vm->error, sizeof(vm->error),
-             "invalid or unsupported ZSCII output character %u (0x%02x)",
-             (unsigned)zscii, (unsigned)(zscii & 0xffU));
-    return TCL_ERROR;
+    return append_utf8(vm, defined ? unicode : (uint16_t)'?');
 }
 
 static int alphabet_zscii(const ZMachine *vm,
