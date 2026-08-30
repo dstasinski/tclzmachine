@@ -101,6 +101,57 @@ int main(void)
         free_vm(&vm);
     }
 
+    {
+        ZMachine vm;
+        init_vm(&vm, 3U, 512U);
+
+        /* V1-V4 always use the standard default extra-character table. */
+        assert(zmachine_text_output_zscii(&vm, 155U) == TCL_OK); /* U+00E4 */
+        assert(zmachine_text_output_zscii(&vm, 220U) == TCL_OK); /* U+0153 */
+        assert(strcmp(zmachine_output_data(&vm),
+                      "\xC3\xA4\xC5\x93") == 0);
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+
+        /*
+         * Header-extension word 3 selects a story Unicode table. ZSCII 155
+         * becomes U+20AC EURO SIGN and 156 becomes U+03A9 GREEK CAPITAL OMEGA.
+         */
+        vm.header_extension_addr = 0x40U;
+        put_word(vm.memory, 0x40U, 3U);
+        put_word(vm.memory, 0x46U, 0x0080U);
+        vm.memory[0x80U] = 2U;
+        put_word(vm.memory, 0x81U, 0x20ACU);
+        put_word(vm.memory, 0x83U, 0x03A9U);
+
+        assert(zmachine_text_output_zscii(&vm, 155U) == TCL_OK);
+        assert(zmachine_text_output_zscii(&vm, 156U) == TCL_OK);
+        assert(zmachine_text_output_zscii(&vm, 157U) == TCL_OK);
+        assert(strcmp(zmachine_output_data(&vm),
+                      "\xE2\x82\xAC\xCE\xA9?") == 0);
+
+        /*
+         * Stream 3 stores ZSCII bytes, not the UTF-8 encoding used by stream 1.
+         * The translated EURO SIGN therefore remains byte 155 in story memory.
+         */
+        Tcl_DStringSetLength(&vm.output, 0);
+        vm.stream3_depth = 1U;
+        vm.stream3_tables[0] = 0xA0U;
+        vm.memory[0xA0U] = 0U;
+        vm.memory[0xA1U] = 0U;
+        assert(zmachine_text_output_zscii(&vm, 155U) == TCL_OK);
+        assert(zmachine_text_output_zscii(&vm, 13U) == TCL_OK);
+        assert(vm.memory[0xA0U] == 0U && vm.memory[0xA1U] == 2U);
+        assert(vm.memory[0xA2U] == 155U);
+        assert(vm.memory[0xA3U] == 13U);
+        assert(Tcl_DStringLength(&vm.output) == 0);
+        free_vm(&vm);
+    }
+
     puts("Z-text decoder tests passed");
     return 0;
 }
