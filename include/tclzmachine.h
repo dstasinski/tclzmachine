@@ -89,9 +89,10 @@ struct ZMachine {
     /*
      * Output-stream state required by VAR:19 output_stream. Stream 1 is the
      * ordinary screen/text stream and is enabled by default after reset. Stream
-     * 3 may be nested; each entry stores the destination table address for a
-     * memory-capture stream. The actual byte capture is kept separate from
-     * presentation policy so later revisions can make it fully spec-complete.
+     * 3 may be nested to the standard maximum depth of 16; each entry stores
+     * the destination table address for one memory-capture level. While any
+     * stream-3 level is active it receives output exclusively, and closing an
+     * inner level resumes the preceding table without changing stream-1 state.
      */
     int output_stream1_enabled;
     uint16_t stream3_tables[ZM_MAX_STREAM3_DEPTH];
