@@ -19,6 +19,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_property.c
     src/zmachine_state.c
     src/zmachine_text.c
+    src/zmachine_undo.c
     src/zmachine_version.c
     src/zmachine_wrap.c
 )
@@ -106,6 +107,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(property-length-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(property-length-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME property-length COMMAND property-length-test)
+
+    add_executable(undo-test tests/undo.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(undo-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(undo-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME undo-state COMMAND undo-test)
 
     add_executable(wrap-test tests/wrap.c src/zmachine_wrap.c)
     target_include_directories(wrap-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
