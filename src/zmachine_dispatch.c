@@ -89,6 +89,41 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
     return TCL_OK;
 }
 
+/*
+ * Handle extended opcodes whose optional host capability is not yet provided.
+ *
+ * EXT:9 save_undo is explicitly allowed to return -1 when the interpreter
+ * cannot provide an in-memory undo cache. EXT:10 restore_undo returns failure
+ * deterministically here because no successful save_undo can have occurred.
+ * Keeping this narrow behavior separate avoids pretending to provide undo
+ * state until a complete per-session snapshot implementation is available.
+ */
+static int handle_extended_compatibility(ZMachine *vm,
+                                         const ZMachineInstruction *instruction,
+                                         int *handled)
+{
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 5U ||
+        instruction->form != ZM_FORM_EXTENDED)
+        return TCL_OK;
+
+    if (instruction->opcode_number == 9U) {
+        *handled = 1;
+        if (instruction->operand_count_actual != 0U)
+            return dispatch_error(vm, "save_undo does not accept operands");
+        return store_value(vm, instruction->next_pc, 0xffffU);
+    }
+
+    if (instruction->opcode_number == 10U) {
+        *handled = 1;
+        if (instruction->operand_count_actual != 0U)
+            return dispatch_error(vm, "restore_undo does not accept operands");
+        return store_value(vm, instruction->next_pc, 0U);
+    }
+
+    return TCL_OK;
+}
+
 /* Apply a Z-machine branch record for a known boolean condition. */
 static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
 {
@@ -371,10 +406,11 @@ static int handle_output_stream(ZMachine *vm,
 /*
  * Handle VAR:30 print_table as plain textual rows.
  *
- * Classic screen tables may contain bytes which are not printable ZSCII at
- * all: low control values and the undefined 127..154 range. Those bytes carry
- * terminal/layout information rather than story text. Within print_table only,
- * discard them; ordinary print_char and packed Z-text remain standards-strict.
+ * In a V5 text-only frontend the only meaningful output bytes are ZSCII null
+ * (which has no effect), newline, printable ASCII, and the defined 155..251
+ * extra-character range. Classic screen tables can contain input-only or
+ * undefined byte values as layout data. Within print_table only, discard those
+ * non-output bytes; ordinary print_char and packed Z-text remain strict.
  */
 static int handle_print_table(ZMachine *vm,
                               const ZMachineInstruction *instruction,
@@ -410,8 +446,11 @@ static int handle_print_table(ZMachine *vm,
             if ((size_t)address >= vm->memory_size)
                 return dispatch_error(vm, "print_table reads outside story memory");
             ch = vm->memory[address++];
-            if ((ch >= 1U && ch <= 31U && ch != 13U) ||
-                (ch >= 127U && ch <= 154U))
+            if (ch == 0U)
+                continue;
+            if (ch != 13U &&
+                !(ch >= 32U && ch <= 126U) &&
+                !(ch >= 155U && ch <= 251U))
                 continue;
             if (zmachine_text_output_zscii(vm, ch) != TCL_OK)
                 return TCL_ERROR;
@@ -501,6 +540,11 @@ int zmachine_step(ZMachine *vm)
         return dispatch_error(vm, decode_error[0] ? decode_error :
                               "unable to decode Z-machine instruction");
     }
+
+    if (handle_extended_compatibility(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
 
     if (handle_indirect_variable_opcode(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
