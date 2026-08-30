@@ -10,6 +10,7 @@
 
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
+#include "zmachine_undo.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -34,6 +35,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
 
 static void free_vm(ZMachine *vm)
 {
+    zmachine_undo_discard(vm);
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
     Tcl_DStringFree(&vm->pending_input);
@@ -179,9 +181,9 @@ int main(void)
     assert(vm.stack[0] == 0x2222U);
 
     /*
-     * EXT:9 is save_undo, not VAR:9 pull. Until the runtime provides a complete
-     * undo snapshot, the standard permits it to store -1. The opcode must not
-     * consume the evaluation stack merely because it shares opcode number 9.
+     * EXT:9 is save_undo, not VAR:9 pull. A successful save stores 1 and must
+     * leave the evaluation stack unchanged merely because the opcode shares
+     * number 9 with pull in a different opcode table.
      */
     vm.memory[0x56] = 0xBEU;
     vm.memory[0x57] = 9U;
@@ -190,16 +192,8 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x5AU);
     assert(vm.sp == 1U && vm.stack[0] == 0x2222U);
-    assert(read_global(&vm, 0x12U) == 0xFFFFU);
-
-    /* No successful save_undo exists, so restore_undo reports failure. */
-    vm.memory[0x5A] = 0xBEU;
-    vm.memory[0x5B] = 10U;
-    vm.memory[0x5C] = 0xFFU; /* no operands */
-    vm.memory[0x5D] = 0x13U;
-    assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x5EU);
-    assert(read_global(&vm, 0x13U) == 0U);
+    assert(read_global(&vm, 0x12U) == 1U);
+    assert(vm.undo_state != NULL);
 
     free_vm(&vm);
 
