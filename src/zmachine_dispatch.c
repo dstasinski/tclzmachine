@@ -36,6 +36,97 @@ static int dispatch_error(ZMachine *vm, const char *message)
 }
 
 /*
+ * Store a result byte followed by a branch record.
+ *
+ * This small local helper is used only for compatibility handling which must
+ * complete before the ordinary executor sees the instruction.
+ */
+static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
+{
+    uint8_t variable;
+    uint8_t first;
+    int branch_on_true;
+    int32_t offset;
+    uint32_t after;
+
+    if (!vm || (size_t)store_pc >= vm->memory_size)
+        return dispatch_error(vm, "truncated null-object store variable");
+
+    variable = vm->memory[store_pc++];
+    if (zmachine_variable_write(vm, variable, 0, 0U) != TCL_OK)
+        return TCL_ERROR;
+
+    if ((size_t)store_pc >= vm->memory_size)
+        return dispatch_error(vm, "truncated null-object branch");
+
+    first = vm->memory[store_pc];
+    branch_on_true = (first & 0x80U) != 0U;
+
+    if (first & 0x40U) {
+        offset = (int32_t)(first & 0x3fU);
+        after = store_pc + 1U;
+    } else {
+        uint16_t raw;
+        if ((size_t)store_pc + 1U >= vm->memory_size)
+            return dispatch_error(vm, "truncated null-object branch");
+        raw = (uint16_t)(((uint16_t)(first & 0x3fU) << 8) |
+                         vm->memory[store_pc + 1U]);
+        if (raw & 0x2000U)
+            raw |= 0xc000U;
+        offset = (int16_t)raw;
+        after = store_pc + 2U;
+    }
+
+    /* Result is zero, so the branch condition is always false. */
+    if (branch_on_true) {
+        vm->pc = after;
+        return TCL_OK;
+    }
+
+    if (offset == 0)
+        return zmachine_return(vm, 0U);
+    if (offset == 1)
+        return zmachine_return(vm, 1U);
+
+    vm->pc = (uint32_t)((int32_t)after + offset - 2);
+    if ((size_t)vm->pc >= vm->memory_size)
+        return dispatch_error(vm, "null-object branch target is outside story memory");
+    return TCL_OK;
+}
+
+/*
+ * Compatibility handling for get_child object 0.
+ *
+ * Object zero is the Z-machine's null object and has no table entry. The
+ * specification leaves queries of object zero undefined, but legacy story
+ * code and compatibility suites may still issue get_child 0. Returning zero
+ * and taking the opcode's false branch is the conservative behaviour: it does
+ * not invent an object and matches the semantic meaning of "nothing".
+ */
+static int handle_null_get_child(ZMachine *vm,
+                                 const ZMachineInstruction *instruction,
+                                 int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+
+    *handled = 0;
+    if (!vm || !instruction ||
+        instruction->operand_count != ZM_OPERANDS_1OP ||
+        instruction->opcode_number != 2U)
+        return TCL_OK;
+
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    if (values[0] != 0U)
+        return TCL_OK;
+
+    *handled = 1;
+    return store_zero_and_branch_false(vm, instruction->next_pc);
+}
+
+/*
  * Return nonzero for presentation opcodes which can safely disappear in a
  * stream-oriented text frontend.
  *
@@ -144,9 +235,12 @@ static int handle_output_stream(ZMachine *vm,
 /*
  * Handle VAR:30 print_table as plain textual rows.
  *
- * Cursor positioning is intentionally discarded, but the ZSCII bytes remain
- * meaningful text. Rows are emitted in order with newlines between them; the
- * optional skip operand advances over unused bytes between source rows.
+ * Cursor positioning is intentionally discarded, but printable ZSCII bytes
+ * remain meaningful text. Some classic Infocom screen tables contain values
+ * 1..7 as nonprinting layout/control placeholders even though those codes are
+ * formally undefined for ZSCII output. In this opcode only, discard those low
+ * controls rather than aborting the story; ordinary print_char and Z-text
+ * output remain strict and continue to reject them.
  */
 static int handle_print_table(ZMachine *vm,
                               const ZMachineInstruction *instruction,
@@ -177,9 +271,13 @@ static int handle_print_table(ZMachine *vm,
 
     for (row = 0U; row < height; ++row) {
         for (column = 0U; column < width; ++column) {
+            uint8_t ch;
             if ((size_t)address >= vm->memory_size)
                 return dispatch_error(vm, "print_table reads outside story memory");
-            if (zmachine_text_output_zscii(vm, vm->memory[address++]) != TCL_OK)
+            ch = vm->memory[address++];
+            if (ch >= 1U && ch <= 7U)
+                continue;
+            if (zmachine_text_output_zscii(vm, ch) != TCL_OK)
                 return TCL_ERROR;
         }
         if (row + 1U < height &&
@@ -273,6 +371,11 @@ int zmachine_step(ZMachine *vm)
         return dispatch_error(vm, decode_error[0] ? decode_error :
                               "unable to decode Z-machine instruction");
     }
+
+    if (handle_null_get_child(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
 
     if (handle_read_char(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
