@@ -4,10 +4,11 @@
  * Z-character/ZSCII decoding and canonical UTF-8 text output.
  *
  * This module translates packed Z-machine text into the session's canonical
- * output buffer.  It understands version-specific alphabets, abbreviations,
- * 10-bit ZSCII escapes, and V5+ custom alphabet tables.  Presentation policy
- * such as IRC word wrapping is intentionally handled after this layer so the
- * VM's own output remains faithful to the story.
+ * output buffer. It understands version-specific alphabets, abbreviations,
+ * 10-bit ZSCII escapes, V5+ custom alphabet tables, and the standard/default
+ * or story-provided Unicode translation table for ZSCII 155..251.
+ * Presentation policy such as IRC word wrapping is intentionally handled after
+ * this layer so the VM's own output remains faithful to the story.
  */
 
 #ifndef ZMACHINE_TEXT_H
@@ -22,7 +23,7 @@ extern "C" {
 
 /*
  * Decode a Z-encoded string beginning at an absolute byte address and append
- * its Unicode/UTF-8 representation to vm->output.  If next_address is non-NULL,
+ * its Unicode/UTF-8 representation to vm->output. If next_address is non-NULL,
  * it receives the first byte after the packed Z-string, which is required for
  * inline print/print_ret instruction execution.
  */
@@ -37,16 +38,20 @@ int zmachine_text_print(ZMachine *vm,
 int zmachine_text_print_packed(ZMachine *vm, uint16_t packed_address);
 
 /*
- * Decode and append the short name from an object's property table.  Object
+ * Decode and append the short name from an object's property table. Object
  * short names use ordinary Z-encoded text preceded by a word-count byte.
  */
 int zmachine_text_print_object_name(ZMachine *vm, uint16_t object);
 
 /*
- * Append one output ZSCII character/code to vm->output as UTF-8.
- * Carriage return (ZSCII 13) becomes '\n'; printable ASCII is copied directly;
- * supported extended ZSCII values are converted without exposing terminal
- * control sequences to Tcl or IRC callers.
+ * Emit one output ZSCII character.
+ *
+ * Stream 1 receives UTF-8: carriage return becomes '\n', ASCII maps directly,
+ * and ZSCII 155..251 is translated through the standard default Unicode table
+ * or a V5+ story-defined table selected by header-extension word 3. Undefined
+ * or unusable extra characters are rendered safely as '?'. While output stream
+ * 3 is active, the original validated ZSCII byte is stored in story memory
+ * instead of its UTF-8 representation.
  */
 int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii);
 
