@@ -138,8 +138,9 @@ static int cmd_create(ClientData clientData, Tcl_Interp *interp,
  * Tcl command: zmachine::command session command
  *
  * Player input is queued and the VM runs cooperatively until it asks for the
- * next line, halts, or errors.  Word wrapping is applied to a temporary Tcl
- * string only after execution finishes, keeping canonical VM output intact.
+ * next line or character, halts, or errors.  Word wrapping is applied to a
+ * temporary Tcl string only after execution finishes, keeping canonical VM
+ * output intact.
  */
 static int cmd_command(ClientData clientData, Tcl_Interp *interp,
                        int objc, Tcl_Obj *const objv[])
@@ -165,8 +166,16 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
 
     if (zmachine_supply_input(s->vm, line) != TCL_OK ||
         zmachine_run(s->vm) != TCL_OK) {
-        Tcl_SetObjResult(interp,
-            Tcl_NewStringObj(zmachine_last_error(s->vm), -1));
+        const char *message = zmachine_last_error(s->vm);
+
+        if (message && message[0] != '\0') {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj(message, -1));
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d)",
+                              (unsigned long)s->vm->pc,
+                              (int)s->vm->state));
+        }
         return TCL_ERROR;
     }
 
