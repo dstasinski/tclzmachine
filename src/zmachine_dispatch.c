@@ -35,50 +35,90 @@ static int dispatch_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
-/*
- * Store a result byte followed by a branch record.
- *
- * This small local helper is used only for compatibility handling which must
- * complete before the ordinary executor sees the instruction.
- */
-static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
+/* Resolve one ordinary operand without touching any preceding operands. */
+static int resolve_operand(ZMachine *vm,
+                           const ZMachineDecodedOperand *operand,
+                           uint16_t *value)
+{
+    if (!vm || !operand || !value)
+        return dispatch_error(vm, "invalid compatibility operand request");
+
+    if (operand->type == ZM_OPERAND_LARGE_CONSTANT ||
+        operand->type == ZM_OPERAND_SMALL_CONSTANT) {
+        *value = operand->value;
+        return TCL_OK;
+    }
+
+    if (operand->type == ZM_OPERAND_VARIABLE)
+        return zmachine_variable_read(vm, (uint8_t)operand->value, 0, value);
+
+    return dispatch_error(vm, "compatibility opcode contains an omitted operand");
+}
+
+/* Return operand zero as a variable number rather than dereferencing it. */
+static int indirect_variable_number(ZMachine *vm,
+                                    const ZMachineInstruction *instruction,
+                                    uint8_t *variable)
+{
+    uint16_t raw;
+
+    if (!instruction || !variable || instruction->operand_count_actual < 1U)
+        return dispatch_error(vm, "indirect-variable opcode is missing its variable operand");
+
+    raw = instruction->operands[0].value;
+    if (raw > 0xffU)
+        return dispatch_error(vm, "indirect-variable operand exceeds variable-number range");
+
+    *variable = (uint8_t)raw;
+    return TCL_OK;
+}
+
+/* Store a normal opcode result and advance past the store-variable byte. */
+static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 {
     uint8_t variable;
+
+    if (!vm || (size_t)store_pc >= vm->memory_size)
+        return dispatch_error(vm, "truncated Z-machine store variable");
+
+    variable = vm->memory[store_pc];
+    if (zmachine_variable_write(vm, variable, 0, value) != TCL_OK)
+        return TCL_ERROR;
+
+    vm->pc = store_pc + 1U;
+    return TCL_OK;
+}
+
+/* Apply a Z-machine branch record for a known boolean condition. */
+static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
+{
     uint8_t first;
     int branch_on_true;
     int32_t offset;
     uint32_t after;
 
-    if (!vm || (size_t)store_pc >= vm->memory_size)
-        return dispatch_error(vm, "truncated null-object store variable");
+    if (!vm || (size_t)branch_pc >= vm->memory_size)
+        return dispatch_error(vm, "truncated Z-machine branch");
 
-    variable = vm->memory[store_pc++];
-    if (zmachine_variable_write(vm, variable, 0, 0U) != TCL_OK)
-        return TCL_ERROR;
-
-    if ((size_t)store_pc >= vm->memory_size)
-        return dispatch_error(vm, "truncated null-object branch");
-
-    first = vm->memory[store_pc];
+    first = vm->memory[branch_pc];
     branch_on_true = (first & 0x80U) != 0U;
 
     if (first & 0x40U) {
         offset = (int32_t)(first & 0x3fU);
-        after = store_pc + 1U;
+        after = branch_pc + 1U;
     } else {
         uint16_t raw;
-        if ((size_t)store_pc + 1U >= vm->memory_size)
-            return dispatch_error(vm, "truncated null-object branch");
+        if ((size_t)branch_pc + 1U >= vm->memory_size)
+            return dispatch_error(vm, "truncated Z-machine branch");
         raw = (uint16_t)(((uint16_t)(first & 0x3fU) << 8) |
-                         vm->memory[store_pc + 1U]);
+                         vm->memory[branch_pc + 1U]);
         if (raw & 0x2000U)
             raw |= 0xc000U;
         offset = (int16_t)raw;
-        after = store_pc + 2U;
+        after = branch_pc + 2U;
     }
 
-    /* Result is zero, so the branch condition is always false. */
-    if (branch_on_true) {
+    if (!!condition != !!branch_on_true) {
         vm->pc = after;
         return TCL_OK;
     }
@@ -90,8 +130,116 @@ static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
 
     vm->pc = (uint32_t)((int32_t)after + offset - 2);
     if ((size_t)vm->pc >= vm->memory_size)
-        return dispatch_error(vm, "null-object branch target is outside story memory");
+        return dispatch_error(vm, "Z-machine branch target is outside story memory");
     return TCL_OK;
+}
+
+/*
+ * Handle opcodes whose first operand is an indirect variable reference.
+ *
+ * The generic operand resolver normally dereferences a variable operand, and
+ * reading variable 0 pops the evaluation stack. For inc, dec, inc_chk,
+ * dec_chk, store, load and pull, however, operand zero denotes a variable
+ * NUMBER. Dereferencing it before executing the opcode causes a second access
+ * inside the opcode and can double-pop stack variable 0. Preserve the raw
+ * variable number here and resolve only the remaining ordinary operands.
+ */
+static int handle_indirect_variable_opcode(ZMachine *vm,
+                                           const ZMachineInstruction *instruction,
+                                           int *handled)
+{
+    uint8_t variable;
+    uint16_t value;
+
+    *handled = 0;
+    if (!vm || !instruction)
+        return TCL_OK;
+
+    if (instruction->operand_count == ZM_OPERANDS_1OP &&
+        (instruction->opcode_number == 5U ||
+         instruction->opcode_number == 6U ||
+         instruction->opcode_number == 14U)) {
+        *handled = 1;
+        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK)
+            return TCL_ERROR;
+        if (zmachine_variable_read(vm, variable, 1, &value) != TCL_OK)
+            return TCL_ERROR;
+
+        if (instruction->opcode_number == 14U)
+            return store_value(vm, instruction->next_pc, value);
+
+        value = instruction->opcode_number == 5U
+                    ? (uint16_t)(value + 1U)
+                    : (uint16_t)(value - 1U);
+        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
+            return TCL_ERROR;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    if (instruction->operand_count == ZM_OPERANDS_2OP &&
+        (instruction->opcode_number == 4U ||
+         instruction->opcode_number == 5U ||
+         instruction->opcode_number == 13U)) {
+        uint16_t second;
+
+        *handled = 1;
+        if (instruction->operand_count_actual < 2U)
+            return dispatch_error(vm, "indirect 2OP opcode is missing its second operand");
+        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK ||
+            resolve_operand(vm, &instruction->operands[1], &second) != TCL_OK)
+            return TCL_ERROR;
+
+        if (instruction->opcode_number == 13U) {
+            if (zmachine_variable_write(vm, variable, 1, second) != TCL_OK)
+                return TCL_ERROR;
+            vm->pc = instruction->next_pc;
+            return TCL_OK;
+        }
+
+        if (zmachine_variable_read(vm, variable, 1, &value) != TCL_OK)
+            return TCL_ERROR;
+        value = instruction->opcode_number == 5U
+                    ? (uint16_t)(value + 1U)
+                    : (uint16_t)(value - 1U);
+        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
+            return TCL_ERROR;
+
+        return apply_branch(vm, instruction->next_pc,
+                            instruction->opcode_number == 5U
+                                ? (int16_t)value > (int16_t)second
+                                : (int16_t)value < (int16_t)second);
+    }
+
+    if (instruction->operand_count == ZM_OPERANDS_VAR &&
+        instruction->opcode_number == 9U && vm->version <= 5U) {
+        *handled = 1;
+        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK)
+            return TCL_ERROR;
+        if (zmachine_stack_pop(vm, &value) != TCL_OK)
+            return TCL_ERROR;
+        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
+            return TCL_ERROR;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    return TCL_OK;
+}
+
+/* Store zero and perform the branch attached to get_child/get_sibling. */
+static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
+{
+    uint8_t variable;
+
+    if (!vm || (size_t)store_pc >= vm->memory_size)
+        return dispatch_error(vm, "truncated null-object store variable");
+
+    variable = vm->memory[store_pc++];
+    if (zmachine_variable_write(vm, variable, 0, 0U) != TCL_OK)
+        return TCL_ERROR;
+
+    return apply_branch(vm, store_pc, 0);
 }
 
 /*
@@ -100,8 +248,7 @@ static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
  * Object zero is the Z-machine's null object and has no table entry. The
  * specification leaves queries of object zero undefined, but legacy story
  * code and compatibility suites may still issue get_child 0. Returning zero
- * and taking the opcode's false branch is the conservative behaviour: it does
- * not invent an object and matches the semantic meaning of "nothing".
+ * and taking the opcode's false branch is the conservative behaviour.
  */
 static int handle_null_get_child(ZMachine *vm,
                                  const ZMachineInstruction *instruction,
@@ -126,16 +273,7 @@ static int handle_null_get_child(ZMachine *vm,
     return store_zero_and_branch_false(vm, instruction->next_pc);
 }
 
-/*
- * Return nonzero for presentation opcodes which can safely disappear in a
- * stream-oriented text frontend.
- *
- * VAR:10 split_window and VAR:11 set_window select terminal windows.
- * VAR:13 erase_window changes only screen contents/cursor placement.
- * VAR:15 set_cursor changes only cursor placement.
- * VAR:17 set_text_style changes visual style only.
- * VAR:18 buffer_mode controls terminal-side line buffering/word wrapping.
- */
+/* Return nonzero for presentation opcodes which can safely disappear. */
 static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
 {
@@ -156,15 +294,7 @@ static int is_text_only_noop(const ZMachine *vm,
            instruction->opcode_number == 18U;
 }
 
-/*
- * Handle VAR:19 output_stream.
- *
- * Streams 1, 2 and 4 are host/presentation facilities and are only tracked or
- * accepted by this text-only runtime. Stream 3 is semantically significant to
- * story code, so its destination-table nesting is retained per session. The
- * actual memory capture path is deliberately isolated from this dispatcher and
- * can be completed without changing opcode decoding or session semantics.
- */
+/* Handle VAR:19 output_stream. */
 static int handle_output_stream(ZMachine *vm,
                                 const ZMachineInstruction *instruction,
                                 int *handled)
@@ -198,7 +328,6 @@ static int handle_output_stream(ZMachine *vm,
         return TCL_OK;
     }
 
-    /* Transcript (2) and command recording (4) have no IRC-side destination. */
     if (stream == 2 || stream == -2 || stream == 4 || stream == -4) {
         vm->pc = instruction->next_pc;
         return TCL_OK;
@@ -235,12 +364,10 @@ static int handle_output_stream(ZMachine *vm,
 /*
  * Handle VAR:30 print_table as plain textual rows.
  *
- * Cursor positioning is intentionally discarded, but printable ZSCII bytes
- * remain meaningful text. Some classic Infocom screen tables contain values
- * 1..7 as nonprinting layout/control placeholders even though those codes are
- * formally undefined for ZSCII output. In this opcode only, discard those low
- * controls rather than aborting the story; ordinary print_char and Z-text
- * output remain strict and continue to reject them.
+ * Screen tables in classic games can contain low terminal/control bytes that
+ * are not legal printable ZSCII. They describe presentation rather than story
+ * text. Within print_table only, discard control values 1..31 except carriage
+ * return (13); ordinary print_char and packed Z-text remain standards-strict.
  */
 static int handle_print_table(ZMachine *vm,
                               const ZMachineInstruction *instruction,
@@ -275,7 +402,7 @@ static int handle_print_table(ZMachine *vm,
             if ((size_t)address >= vm->memory_size)
                 return dispatch_error(vm, "print_table reads outside story memory");
             ch = vm->memory[address++];
-            if (ch >= 1U && ch <= 7U)
+            if (ch >= 1U && ch <= 31U && ch != 13U)
                 continue;
             if (zmachine_text_output_zscii(vm, ch) != TCL_OK)
                 return TCL_ERROR;
@@ -290,14 +417,7 @@ static int handle_print_table(ZMachine *vm,
     return TCL_OK;
 }
 
-/*
- * Handle VAR:22 read_char using cooperative Tcl input.
- *
- * A call which reaches read_char without queued input suspends at the opcode
- * with the PC unchanged. On the next zmachine::command call, the first byte of
- * the supplied Tcl string is returned as the ZSCII character. The entire
- * queued item is then consumed because it answered a character request.
- */
+/* Handle VAR:22 read_char using cooperative Tcl input. */
 static int handle_read_char(ZMachine *vm,
                             const ZMachineInstruction *instruction,
                             int *handled)
@@ -371,6 +491,11 @@ int zmachine_step(ZMachine *vm)
         return dispatch_error(vm, decode_error[0] ? decode_error :
                               "unable to decode Z-machine instruction");
     }
+
+    if (handle_indirect_variable_opcode(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
 
     if (handle_null_get_child(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
