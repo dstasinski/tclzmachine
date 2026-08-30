@@ -530,7 +530,7 @@ int zmachine_step(ZMachine *vm)
     if (!is_text_only_noop(vm, &instruction))
         return zmachine_step_core(vm);
 
-    if (instruction->operand_count_actual < 1U)
+    if (instruction.operand_count_actual < 1U)
         return dispatch_error(vm, "presentation opcode is missing its operand");
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
