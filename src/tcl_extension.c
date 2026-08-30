@@ -3,11 +3,10 @@
  *
  * Tcl 8.6 loadable-extension boundary for tclzmachine.
  *
- * This file owns Tcl-visible session names and presentation options.  Each
- * session contains one independent ZMachine instance, allowing a bot to keep
- * many games alive concurrently.  VM execution remains unaware of IRC or Tcl
- * formatting policy; optional word wrapping is applied only while returning a
- * completed output string to Tcl.
+ * This file owns Tcl-visible session names, presentation options, and host file
+ * policy. Each session contains one independent ZMachine instance. Ordinary VM
+ * execution remains unaware of IRC formatting and filesystem naming; when a
+ * story requests a full save/restore, the VM yields and Tcl supplies the path.
  */
 
 #include "tclzmachine.h"
@@ -19,18 +18,17 @@
 
 /* One Tcl-visible game session and its presentation configuration. */
 typedef struct Session {
-    char *name;                  /* Unique name supplied by the Tcl caller. */
-    ZMachine *vm;               /* Independent interpreter instance. */
-    size_t wordwrap_bytes;       /* 0 disables automatic output wrapping. */
-    struct Session *next;        /* Singly-linked extension session list. */
+    char *name;
+    ZMachine *vm;
+    size_t wordwrap_bytes;
+    struct Session *next;
 } Session;
 
-/* Interpreter-associated state shared by the Tcl command implementations. */
+/* Interpreter-associated state shared by all Tcl command implementations. */
 typedef struct ExtensionState {
     Session *sessions;
 } ExtensionState;
 
-/* Allocate a C-owned duplicate of a Tcl string. */
 static char *dup_string(const char *s)
 {
     size_t len;
@@ -38,7 +36,6 @@ static char *dup_string(const char *s)
 
     if (!s)
         return NULL;
-
     len = strlen(s) + 1U;
     copy = (char *)malloc(len);
     if (copy)
@@ -46,14 +43,12 @@ static char *dup_string(const char *s)
     return copy;
 }
 
-/* Find a named session without exposing the linked-list representation. */
 static Session *find_session(ExtensionState *state, const char *name)
 {
     Session *s;
 
     if (!state || !name)
         return NULL;
-
     for (s = state->sessions; s; s = s->next) {
         if (strcmp(s->name, name) == 0)
             return s;
@@ -61,7 +56,6 @@ static Session *find_session(ExtensionState *state, const char *name)
     return NULL;
 }
 
-/* Free all sessions when the containing Tcl interpreter is destroyed. */
 static void free_state(ClientData clientData, Tcl_Interp *interp)
 {
     ExtensionState *state = (ExtensionState *)clientData;
@@ -76,6 +70,94 @@ static void free_state(ClientData clientData, Tcl_Interp *interp)
         s = next;
     }
     free(state);
+}
+
+/* Convert the session's canonical VM output to its Tcl-facing result. */
+static int set_session_output(Tcl_Interp *interp, Session *s)
+{
+    if (!interp || !s || !s->vm)
+        return TCL_ERROR;
+
+    if (s->wordwrap_bytes == 0U) {
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj(zmachine_output_data(s->vm),
+                             zmachine_output_length(s->vm)));
+        return TCL_OK;
+    }
+
+    {
+        Tcl_DString wrapped;
+        Tcl_DStringInit(&wrapped);
+
+        if (zmachine_wrap_output(zmachine_output_data(s->vm),
+                                 (size_t)zmachine_output_length(s->vm),
+                                 s->wordwrap_bytes,
+                                 &wrapped) != TCL_OK) {
+            Tcl_DStringFree(&wrapped);
+            Tcl_SetObjResult(interp,
+                Tcl_NewStringObj("unable to word-wrap game output", -1));
+            return TCL_ERROR;
+        }
+
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj(Tcl_DStringValue(&wrapped),
+                             Tcl_DStringLength(&wrapped)));
+        Tcl_DStringFree(&wrapped);
+    }
+    return TCL_OK;
+}
+
+/* Produce a useful Tcl diagnostic even if a lower layer omitted vm->error. */
+static int set_vm_failure(Tcl_Interp *interp, ZMachine *vm)
+{
+    const char *message;
+
+    if (!interp || !vm)
+        return TCL_ERROR;
+    message = zmachine_last_error(vm);
+    if (message && message[0] != '\0') {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(message, -1));
+        return TCL_ERROR;
+    }
+
+    if (vm->state == ZM_STATE_HALTED) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("Z-machine session is halted", -1));
+        return TCL_ERROR;
+    }
+
+    {
+        ZMachineInstruction instruction;
+        char decode_error[128];
+        decode_error[0] = '\0';
+
+        if (zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                        vm->pc, &instruction,
+                                        decode_error, sizeof(decode_error))) {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("Z-machine operation failed at pc 0x%lx (state %d): form=%u count=%u opcode=%u operands=%u",
+                              (unsigned long)vm->pc,
+                              (int)vm->state,
+                              (unsigned)instruction.form,
+                              (unsigned)instruction.operand_count,
+                              (unsigned)instruction.opcode_number,
+                              (unsigned)instruction.operand_count_actual));
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("Z-machine operation failed at pc 0x%lx (state %d): decode failed: %s",
+                              (unsigned long)vm->pc,
+                              (int)vm->state,
+                              decode_error[0] ? decode_error : "unknown decode error"));
+        }
+    }
+    return TCL_ERROR;
+}
+
+/* Run after input/file completion until the next cooperative yield. */
+static int run_session(Tcl_Interp *interp, Session *s)
+{
+    if (zmachine_run(s->vm) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return set_session_output(interp, s);
 }
 
 /* Tcl command: zmachine::create session storyfile */
@@ -94,7 +176,6 @@ static int cmd_create(ClientData clientData, Tcl_Interp *interp,
 
     name = Tcl_GetString(objv[1]);
     path = Tcl_GetString(objv[2]);
-
     if (find_session(state, name)) {
         Tcl_SetObjResult(interp,
             Tcl_ObjPrintf("session \"%s\" already exists", name));
@@ -109,8 +190,6 @@ static int cmd_create(ClientData clientData, Tcl_Interp *interp,
 
     s->name = dup_string(name);
     s->vm = zmachine_create();
-    s->wordwrap_bytes = 0U; /* Preserve canonical story output by default. */
-
     if (!s->name || !s->vm) {
         free(s->name);
         zmachine_destroy(s->vm);
@@ -130,26 +209,17 @@ static int cmd_create(ClientData clientData, Tcl_Interp *interp,
 
     s->next = state->sessions;
     state->sessions = s;
-
     Tcl_SetObjResult(interp, Tcl_NewStringObj(name, -1));
     return TCL_OK;
 }
 
-/*
- * Tcl command: zmachine::command session command
- *
- * Player input is queued and the VM runs cooperatively until it asks for the
- * next line or character, halts, or errors.  Word wrapping is applied to a
- * temporary Tcl string only after execution finishes, keeping canonical VM
- * output intact.
- */
+/* Tcl command: zmachine::command session command */
 static int cmd_command(ClientData clientData, Tcl_Interp *interp,
                        int objc, Tcl_Obj *const objv[])
 {
     ExtensionState *state = (ExtensionState *)clientData;
     Session *s;
     const char *name;
-    const char *line;
 
     if (objc != 3) {
         Tcl_WrongNumArgs(interp, 1, objv, "session command");
@@ -157,7 +227,6 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
     }
 
     name = Tcl_GetString(objv[1]);
-    line = Tcl_GetString(objv[2]);
     s = find_session(state, name);
     if (!s) {
         Tcl_SetObjResult(interp,
@@ -165,78 +234,71 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
         return TCL_ERROR;
     }
 
-    if (zmachine_supply_input(s->vm, line) != TCL_OK ||
-        zmachine_run(s->vm) != TCL_OK) {
-        const char *message = zmachine_last_error(s->vm);
-
-        if (message && message[0] != '\0') {
-            Tcl_SetObjResult(interp, Tcl_NewStringObj(message, -1));
-        } else {
-            ZMachineInstruction instruction;
-            char decode_error[128];
-
-            decode_error[0] = '\0';
-            if (zmachine_decode_instruction(s->vm->memory,
-                                            s->vm->memory_size,
-                                            s->vm->version,
-                                            s->vm->pc,
-                                            &instruction,
-                                            decode_error,
-                                            sizeof(decode_error))) {
-                Tcl_SetObjResult(interp,
-                    Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d): form=%u count=%u opcode=%u operands=%u",
-                                  (unsigned long)s->vm->pc,
-                                  (int)s->vm->state,
-                                  (unsigned)instruction.form,
-                                  (unsigned)instruction.operand_count,
-                                  (unsigned)instruction.opcode_number,
-                                  (unsigned)instruction.operand_count_actual));
-            } else {
-                Tcl_SetObjResult(interp,
-                    Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d): decode failed: %s",
-                                  (unsigned long)s->vm->pc,
-                                  (int)s->vm->state,
-                                  decode_error[0] ? decode_error : "unknown decode error"));
-            }
-        }
+    if (s->vm->state == ZM_STATE_WAITING_SAVE ||
+        s->vm->state == ZM_STATE_WAITING_RESTORE) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s",
+                          name,
+                          s->vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
         return TCL_ERROR;
     }
 
-    if (s->wordwrap_bytes == 0U) {
-        Tcl_SetObjResult(interp,
-            Tcl_NewStringObj(zmachine_output_data(s->vm),
-                             zmachine_output_length(s->vm)));
-    } else {
-        Tcl_DString wrapped;
-        Tcl_DStringInit(&wrapped);
-
-        if (zmachine_wrap_output(zmachine_output_data(s->vm),
-                                 (size_t)zmachine_output_length(s->vm),
-                                 s->wordwrap_bytes,
-                                 &wrapped) != TCL_OK) {
-            Tcl_DStringFree(&wrapped);
-            Tcl_SetObjResult(interp,
-                Tcl_NewStringObj("unable to word-wrap game output", -1));
-            return TCL_ERROR;
-        }
-
-        Tcl_SetObjResult(interp,
-            Tcl_NewStringObj(Tcl_DStringValue(&wrapped),
-                             Tcl_DStringLength(&wrapped)));
-        Tcl_DStringFree(&wrapped);
-    }
-
-    return TCL_OK;
+    if (zmachine_supply_input(s->vm, Tcl_GetString(objv[2])) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return run_session(interp, s);
 }
 
-/*
- * Tcl command: zmachine::configure session ?-wordwrap ?bytes??
- *
- * With no option, return all presentation settings as a dictionary.  With an
- * option only, return its current value.  Supplying a value changes that
- * setting.  -wordwrap 0 disables wrapping; positive values are maximum UTF-8
- * byte counts per returned physical line.
- */
+/* Tcl command: zmachine::save session path */
+static int cmd_save(ClientData clientData, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{
+    ExtensionState *state = (ExtensionState *)clientData;
+    Session *s;
+    const char *name;
+
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session path");
+        return TCL_ERROR;
+    }
+    name = Tcl_GetString(objv[1]);
+    s = find_session(state, name);
+    if (!s) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("unknown session \"%s\"", name));
+        return TCL_ERROR;
+    }
+
+    if (zmachine_save_file(s->vm, Tcl_GetString(objv[2])) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return run_session(interp, s);
+}
+
+/* Tcl command: zmachine::restore session path */
+static int cmd_restore(ClientData clientData, Tcl_Interp *interp,
+                       int objc, Tcl_Obj *const objv[])
+{
+    ExtensionState *state = (ExtensionState *)clientData;
+    Session *s;
+    const char *name;
+
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session path");
+        return TCL_ERROR;
+    }
+    name = Tcl_GetString(objv[1]);
+    s = find_session(state, name);
+    if (!s) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("unknown session \"%s\"", name));
+        return TCL_ERROR;
+    }
+
+    if (zmachine_restore_file(s->vm, Tcl_GetString(objv[2])) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return run_session(interp, s);
+}
+
+/* Tcl command: zmachine::configure session ?-wordwrap ?bytes?? */
 static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
                          int objc, Tcl_Obj *const objv[])
 {
@@ -306,6 +368,7 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
     Session *s;
     Tcl_Obj *dict;
     const char *name;
+    const char *file_request = "";
 
     if (objc != 2) {
         Tcl_WrongNumArgs(interp, 1, objv, "session");
@@ -319,6 +382,11 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
             Tcl_ObjPrintf("unknown session \"%s\"", name));
         return TCL_ERROR;
     }
+
+    if (s->vm->state == ZM_STATE_WAITING_SAVE)
+        file_request = "save";
+    else if (s->vm->state == ZM_STATE_WAITING_RESTORE)
+        file_request = "restore";
 
     dict = Tcl_NewDictObj();
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("version", -1),
@@ -339,6 +407,8 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewIntObj(s->vm->string_offset));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("state", -1),
                    Tcl_NewIntObj((int)s->vm->state));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
+                   Tcl_NewStringObj(file_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("wordWrapBytes", -1),
                    Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
     Tcl_SetObjResult(interp, dict);
@@ -375,13 +445,7 @@ static int cmd_destroy(ClientData clientData, Tcl_Interp *interp,
     return TCL_ERROR;
 }
 
-/*
- * Package initialization entry point called by Tcl's load command.
- *
- * The extension requests the Tcl 8.6 stub API, creates its namespace and
- * commands, and associates the allocated ExtensionState with interpreter
- * deletion so no game sessions leak when Tcl exits.
- */
+/* Package initialization entry point called by Tcl's load command. */
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -404,6 +468,10 @@ int Tclzmachine_Init(Tcl_Interp *interp)
                          cmd_create, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::command",
                          cmd_command, state, NULL);
+    Tcl_CreateObjCommand(interp, "::zmachine::save",
+                         cmd_save, state, NULL);
+    Tcl_CreateObjCommand(interp, "::zmachine::restore",
+                         cmd_restore, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::configure",
                          cmd_configure, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::info",
