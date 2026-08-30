@@ -19,13 +19,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Defensive upper bound against malformed strings that never set the end bit. */
 #define ZM_TEXT_MAX_WORDS 65536U
-
-/* Abbreviations may not recursively contain abbreviations; keep a hard guard. */
 #define ZM_TEXT_MAX_RECURSION 8U
 
-/* Put the VM into its error state with a text-decoder diagnostic. */
 static void text_error(ZMachine *vm, const char *message)
 {
     if (!vm)
@@ -35,7 +31,6 @@ static void text_error(ZMachine *vm, const char *message)
     snprintf(vm->error, sizeof(vm->error), "%s", message);
 }
 
-/* Read one byte from story memory with bounds checking. */
 static int read_byte(const ZMachine *vm, uint32_t address, uint8_t *value)
 {
     if (!vm || !vm->memory || !value ||
@@ -46,7 +41,6 @@ static int read_byte(const ZMachine *vm, uint32_t address, uint8_t *value)
     return TCL_OK;
 }
 
-/* Read one big-endian word from story memory with bounds checking. */
 static int read_word(const ZMachine *vm, uint32_t address, uint16_t *value)
 {
     if (!vm || !vm->memory || !value ||
@@ -58,13 +52,6 @@ static int read_word(const ZMachine *vm, uint32_t address, uint16_t *value)
     return TCL_OK;
 }
 
-/*
- * Encode one Unicode code point up to U+FFFF as UTF-8 and append it.
- *
- * ZSCII-to-Unicode translation in the currently supported paths produces only
- * values that fit in one, two, or three UTF-8 bytes, so a four-byte buffer is
- * unnecessary here.
- */
 static int append_utf8(ZMachine *vm, uint16_t codepoint)
 {
     char out[3];
@@ -91,14 +78,6 @@ static int append_utf8(ZMachine *vm, uint16_t codepoint)
     return TCL_OK;
 }
 
-/*
- * Convert one output ZSCII value to canonical UTF-8 text.
- *
- * ZSCII 0 is a no-op.  ZSCII 13 is newline.  Printable ASCII maps directly.
- * Extended ZSCII 155..251 currently falls back to '?' until the Unicode
- * translation-table work is added; this is sufficient for classic Infocom
- * games while remaining explicit about the current limitation.
- */
 int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii)
 {
     if (!vm)
@@ -115,28 +94,18 @@ int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii)
     if (zscii >= 32U && zscii <= 126U)
         return append_utf8(vm, zscii);
 
-    /*
-     * Extra-character Unicode translation is intentionally conservative in
-     * this milestone.  Later Unicode-table support can map ZSCII 155..251
-     * precisely for newer story files.
-     */
     if (zscii >= 155U && zscii <= 251U) {
         zmachine_output_append(vm, "?", 1U);
         return TCL_OK;
     }
 
-    text_error(vm, "invalid or unsupported ZSCII output character");
+    vm->state = ZM_STATE_ERROR;
+    snprintf(vm->error, sizeof(vm->error),
+             "invalid or unsupported ZSCII output character %u (0x%02x)",
+             (unsigned)zscii, (unsigned)(zscii & 0xffU));
     return TCL_ERROR;
 }
 
-/*
- * Convert an alphabet/zchar pair to one ZSCII character.
- *
- * A0 and A1 are lower/upper-case Latin letters.  A2 supplies digits and
- * punctuation and differs slightly in V1 versus V2+.  V5+ stories may replace
- * all three default alphabets with the 78-byte custom table whose address is
- * stored in header extension fields 0x34/0x35.
- */
 static int alphabet_zscii(const ZMachine *vm,
                           uint8_t alphabet,
                           uint8_t zchar,
@@ -153,7 +122,6 @@ static int alphabet_zscii(const ZMachine *vm,
     if (!vm || !zscii || alphabet > 2U || zchar < 6U || zchar > 31U)
         return TCL_ERROR;
 
-    /* Header 0x34 contains the custom alphabet table address in V5+. */
     if (vm->version >= 5U && vm->memory_size > 0x35U) {
         table_addr = (uint16_t)(((uint16_t)vm->memory[0x34] << 8) |
                                vm->memory[0x35]);
@@ -184,10 +152,6 @@ static int alphabet_zscii(const ZMachine *vm,
     return TCL_OK;
 }
 
-/*
- * Apply a V1/V2 relative alphabet shift.
- * Z-character 2 advances one alphabet; Z-character 3 advances two.
- */
 static uint8_t shift_alphabet(uint8_t current, uint8_t zchar)
 {
     if (zchar == 2U)
@@ -196,14 +160,6 @@ static uint8_t shift_alphabet(uint8_t current, uint8_t zchar)
     return (uint8_t)((current + 2U) % 3U);
 }
 
-/*
- * Decode one packed Z-string recursively.
- *
- * allow_abbreviations is false while decoding abbreviation text because the
- * standard forbids abbreviations from recursively referring to abbreviations.
- * depth provides an additional malformed-story safety guard.  next_address,
- * when requested, receives the byte following the final packed word.
- */
 static int decode_internal(ZMachine *vm,
                            uint32_t address,
                            int allow_abbreviations,
@@ -234,7 +190,6 @@ static int decode_internal(ZMachine *vm,
         unsigned i;
         int final_word;
 
-        /* Every packed word contains three 5-bit Z-characters. */
         if (++words > ZM_TEXT_MAX_WORDS ||
             read_word(vm, cursor, &word) != TCL_OK) {
             text_error(vm, "unterminated or truncated Z-text string");
@@ -252,10 +207,6 @@ static int decode_internal(ZMachine *vm,
             uint8_t alphabet;
             uint16_t out;
 
-            /*
-             * The Z-character after an abbreviation marker selects one of 32
-             * entries in one of the three abbreviation tables.
-             */
             if (abbreviation_pending) {
                 uint16_t packed;
                 uint32_t entry =
@@ -274,7 +225,6 @@ static int decode_internal(ZMachine *vm,
                     return TCL_ERROR;
                 }
 
-                /* Abbreviation pointers are always word-addressed. */
                 if (decode_internal(vm,
                                     (uint32_t)packed * 2U,
                                     0,
@@ -286,10 +236,6 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /*
-             * A2 Z-character 6 consumes the next two Z-characters as a single
-             * 10-bit ZSCII value, high five bits first.
-             */
             if (zscii_pending != 0) {
                 if (zscii_pending == 2) {
                     zscii_value = (uint16_t)z << 5;
@@ -304,7 +250,6 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /* Z-character 0 is a space in every supported version. */
             if (z == 0U) {
                 if (zmachine_text_output_zscii(vm, 32U) != TCL_OK)
                     return TCL_ERROR;
@@ -313,17 +258,12 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /* V1 alone uses Z-character 1 as newline. */
             if (vm->version == 1U && z == 1U) {
                 if (zmachine_text_output_zscii(vm, 13U) != TCL_OK)
                     return TCL_ERROR;
                 continue;
             }
 
-            /*
-             * V2 uses marker 1 for its single abbreviation table.  V3+ use
-             * markers 1, 2, and 3 for three 32-entry abbreviation sets.
-             */
             if ((vm->version >= 3U && z >= 1U && z <= 3U) ||
                 (vm->version == 2U && z == 1U)) {
                 abbreviation_pending = 1;
@@ -331,14 +271,12 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /* V1/V2 Z-characters 2 and 3 are temporary relative shifts. */
             if (vm->version <= 2U && (z == 2U || z == 3U)) {
                 temporary_alphabet = shift_alphabet(current_alphabet, z);
                 has_temporary_alphabet = 1;
                 continue;
             }
 
-            /* V1/V2 Z-characters 4 and 5 are persistent relative shifts. */
             if (vm->version <= 2U && (z == 4U || z == 5U)) {
                 current_alphabet =
                     shift_alphabet(current_alphabet, (uint8_t)(z - 2U));
@@ -346,7 +284,6 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /* V3+ markers 4 and 5 temporarily select A1 and A2. */
             if (vm->version >= 3U && (z == 4U || z == 5U)) {
                 temporary_alphabet = (uint8_t)(z - 3U);
                 has_temporary_alphabet = 1;
@@ -357,7 +294,6 @@ static int decode_internal(ZMachine *vm,
                            ? temporary_alphabet
                            : current_alphabet;
 
-            /* A2 Z-character 6 begins a 10-bit ZSCII escape in V2+. */
             if (alphabet == 2U && z == 6U && vm->version >= 2U) {
                 zscii_pending = 2;
                 if (vm->version >= 3U)
@@ -365,7 +301,6 @@ static int decode_internal(ZMachine *vm,
                 continue;
             }
 
-            /* A2 Z-character 7 is newline in the standard V2+ alphabet. */
             if (alphabet == 2U && z == 7U && vm->version >= 2U) {
                 if (zmachine_text_output_zscii(vm, 13U) != TCL_OK)
                     return TCL_ERROR;
@@ -382,7 +317,6 @@ static int decode_internal(ZMachine *vm,
             if (zmachine_text_output_zscii(vm, out) != TCL_OK)
                 return TCL_ERROR;
 
-            /* V3+ shifts apply to one printable character only. */
             if (has_temporary_alphabet)
                 has_temporary_alphabet = 0;
         }
@@ -397,7 +331,6 @@ static int decode_internal(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Decode an absolute-address Z-string and append it to the output buffer. */
 int zmachine_text_print(ZMachine *vm,
                         uint32_t address,
                         uint32_t *next_address)
@@ -405,7 +338,6 @@ int zmachine_text_print(ZMachine *vm,
     return decode_internal(vm, address, 1, 0U, next_address);
 }
 
-/* Decode a version-dependent packed string address. */
 int zmachine_text_print_packed(ZMachine *vm, uint16_t packed_address)
 {
     uint32_t address;
@@ -417,13 +349,6 @@ int zmachine_text_print_packed(ZMachine *vm, uint16_t packed_address)
     return zmachine_text_print(vm, address, NULL);
 }
 
-/*
- * Decode an object's short name.
- *
- * The first byte of an object property table is the short-name length measured
- * in packed words.  A zero word count means the object has no printable name;
- * otherwise the Z-string begins immediately after that byte.
- */
 int zmachine_text_print_object_name(ZMachine *vm, uint16_t object)
 {
     uint32_t table;
