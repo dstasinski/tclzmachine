@@ -24,16 +24,16 @@ extern "C" {
 #endif
 
 /*
- * Resolve decoded operands from left to right into the values required by the
- * opcode that owns them.
+ * Resolve decoded operands from left to right into concrete 16-bit values.
  *
- * Constants are copied directly and ordinary variable operands are read using
- * normal Z-machine semantics, so variable 0 pops the evaluation stack. The
- * seven indirect-variable opcodes (inc, dec, inc_chk, dec_chk, load, store,
- * and V1-V5 pull) are the exception: operand zero remains the raw variable
- * number for the opcode itself to access indirectly. Left-to-right evaluation
- * order is observable whenever ordinary variable 0 operands occur more than
- * once, so callers must not reorder resolution.
+ * Constants are copied directly. Variable-type operands are always evaluated
+ * by value using normal Z-machine semantics, so variable 0 pops the evaluation
+ * stack. For inc, dec, inc_chk, dec_chk, load, store, and V1-V5 pull, the
+ * resulting value is then interpreted by the opcode as a variable number and
+ * that target variable is accessed indirectly. Thus a target variable number
+ * of 0 is read or written in place, while a Variable-type operand 0 used to
+ * obtain that target number is still evaluated normally. Left-to-right order
+ * remains observable and must not be changed.
  */
 int zmachine_resolve_operands(ZMachine *vm,
                               const ZMachineInstruction *instruction,
