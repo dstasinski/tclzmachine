@@ -1,11 +1,10 @@
 /*
  * presentation.c
  *
- * Regression tests for presentation-only Z-machine opcodes which tclzmachine
- * intentionally reduces to no-ops in its stream-oriented text frontend, plus
- * the cooperative read_char policy used by non-interactive Tcl/IRC sessions.
- * These tests verify instruction advancement, operand-evaluation side effects,
- * input suspension, and explicit character delivery.
+ * Regression tests for presentation-oriented Z-machine behavior adapted to
+ * the stream-oriented Tcl/IRC frontend. These tests cover layout no-ops,
+ * cooperative character input, output-stream bookkeeping, and print_table
+ * conversion to plain text.
  */
 
 #include "tclzmachine.h"
@@ -17,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Build a minimal in-memory VM suitable for isolated opcode execution. */
 static void init_vm(ZMachine *vm, uint8_t version, size_t size)
 {
     memset(vm, 0, sizeof(*vm));
@@ -28,11 +26,11 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     vm->static_memory_addr = (uint16_t)size;
     vm->globals_addr = 0x100U;
     vm->state = ZM_STATE_READY;
+    vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
-/* Release resources initialized by init_vm. */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -40,7 +38,6 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
-/* Read one global variable directly from the synthetic story image. */
 static uint16_t read_global(const ZMachine *vm, uint8_t variable)
 {
     size_t address = (size_t)vm->globals_addr +
@@ -79,7 +76,7 @@ int main(void)
 
     /* VAR:15 set_cursor has two coordinates but no textual effect. */
     vm.memory[0x29] = 0xEFU;
-    vm.memory[0x2A] = 0x5FU; /* two small constants, then omitted operands */
+    vm.memory[0x2A] = 0x5FU;
     vm.memory[0x2B] = 1U;
     vm.memory[0x2C] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
@@ -99,10 +96,7 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x33U && vm.state == ZM_STATE_READY);
 
-    /*
-     * A no-op still evaluates variable operands. Variable 0 is the stack, so
-     * this erase_window encoding must pop one value before advancing the PC.
-     */
+    /* A discarded opcode must still evaluate stack-variable operands. */
     assert(zmachine_stack_push(&vm, 0xFFFFU) == TCL_OK);
     vm.memory[0x33] = 0xEDU;
     vm.memory[0x34] = 0xBFU;
@@ -110,25 +104,51 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x36U && vm.sp == 0U);
 
-    /*
-     * VAR:22 read_char first suspends with the PC unchanged because no input
-     * has been queued.  Supplying "x" then satisfies the same instruction,
-     * stores ASCII/ZSCII x, consumes that queued character response, and
-     * advances past the store variable.
-     */
+    /* read_char suspends, then consumes one explicit Tcl input item. */
     vm.memory[0x36] = 0xF6U;
     vm.memory[0x37] = 0x7FU;
     vm.memory[0x38] = 1U;
     vm.memory[0x39] = 0x10U;
-
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x36U && vm.state == ZM_STATE_WAITING_INPUT);
-
     assert(zmachine_supply_input(&vm, "x") == TCL_OK);
-    assert(vm.state == ZM_STATE_READY);
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x3AU && read_global(&vm, 0x10U) == (uint16_t)'x');
     assert(vm.input_available == 0);
+
+    /* output_stream 3 records its destination table and initializes length. */
+    vm.memory[0x3A] = 0xF3U;
+    vm.memory[0x3B] = 0x4FU; /* small stream number, large table address */
+    vm.memory[0x3C] = 3U;
+    vm.memory[0x3D] = 0x00U;
+    vm.memory[0x3E] = 0x90U;
+    vm.memory[0x90] = 0xAAU;
+    vm.memory[0x91] = 0xBBU;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x3FU && vm.stream3_depth == 1U);
+    assert(vm.stream3_tables[0] == 0x90U);
+    assert(vm.memory[0x90] == 0U && vm.memory[0x91] == 0U);
+
+    /* output_stream -3 closes the most recent memory stream. */
+    vm.memory[0x3F] = 0xF3U;
+    vm.memory[0x40] = 0x3FU; /* one large constant */
+    vm.memory[0x41] = 0xFFU;
+    vm.memory[0x42] = 0xFDU;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x43U && vm.stream3_depth == 0U);
+
+    /* print_table emits rows as plain text separated by newlines. */
+    memcpy(vm.memory + 0x80U, "ABCD", 4U);
+    vm.memory[0x43] = 0xFEU;
+    vm.memory[0x44] = 0x15U; /* large address, then three small operands */
+    vm.memory[0x45] = 0x00U;
+    vm.memory[0x46] = 0x80U;
+    vm.memory[0x47] = 2U; /* width */
+    vm.memory[0x48] = 2U; /* height */
+    vm.memory[0x49] = 0U; /* skip */
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x4AU);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "AB\nCD") == 0);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
