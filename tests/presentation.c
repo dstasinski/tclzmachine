@@ -164,14 +164,14 @@ int main(void)
     assert(read_global(&vm, 0x11U) == 0U);
 
     /*
-     * VAR:9 pull with operand variable 0 is an indirect-variable reference.
-     * It must pop exactly once and then replace the new top stack value; the
-     * operand itself must not be dereferenced by the generic resolver first.
+     * VAR:9 pull directly targeting stack variable 0 is encoded with a small
+     * constant 0. The pull removes one value, then the indirect write replaces
+     * the new top rather than pushing or popping stack variable 0 again.
      */
     assert(zmachine_stack_push(&vm, 0x1111U) == TCL_OK);
     assert(zmachine_stack_push(&vm, 0x2222U) == TCL_OK);
     vm.memory[0x53] = 0xE9U;
-    vm.memory[0x54] = 0xBFU;
+    vm.memory[0x54] = 0x7FU;
     vm.memory[0x55] = 0U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x56U);
