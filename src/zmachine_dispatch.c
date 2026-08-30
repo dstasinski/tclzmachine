@@ -35,44 +35,6 @@ static int dispatch_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
-/* Resolve one ordinary operand without touching any preceding operands. */
-static int resolve_operand(ZMachine *vm,
-                           const ZMachineDecodedOperand *operand,
-                           uint16_t *value)
-{
-    if (!vm || !operand || !value)
-        return dispatch_error(vm, "invalid compatibility operand request");
-
-    if (operand->type == ZM_OPERAND_LARGE_CONSTANT ||
-        operand->type == ZM_OPERAND_SMALL_CONSTANT) {
-        *value = operand->value;
-        return TCL_OK;
-    }
-
-    if (operand->type == ZM_OPERAND_VARIABLE)
-        return zmachine_variable_read(vm, (uint8_t)operand->value, 0, value);
-
-    return dispatch_error(vm, "compatibility opcode contains an omitted operand");
-}
-
-/* Return operand zero as a variable number rather than dereferencing it. */
-static int indirect_variable_number(ZMachine *vm,
-                                    const ZMachineInstruction *instruction,
-                                    uint8_t *variable)
-{
-    uint16_t raw;
-
-    if (!instruction || !variable || instruction->operand_count_actual < 1U)
-        return dispatch_error(vm, "indirect-variable opcode is missing its variable operand");
-
-    raw = instruction->operands[0].value;
-    if (raw > 0xffU)
-        return dispatch_error(vm, "indirect-variable operand exceeds variable-number range");
-
-    *variable = (uint8_t)raw;
-    return TCL_OK;
-}
-
 /* Store a normal opcode result and advance past the store-variable byte. */
 static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 {
@@ -166,104 +128,6 @@ static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
     vm->pc = (uint32_t)((int32_t)after + offset - 2);
     if ((size_t)vm->pc >= vm->memory_size)
         return dispatch_error(vm, "Z-machine branch target is outside story memory");
-    return TCL_OK;
-}
-
-/*
- * Handle opcodes whose first operand is an indirect variable reference.
- *
- * The generic operand resolver normally dereferences a variable operand, and
- * reading variable 0 pops the evaluation stack. For inc, dec, inc_chk,
- * dec_chk, store, load and pull, however, operand zero denotes a variable
- * NUMBER. Dereferencing it before executing the opcode causes a second access
- * inside the opcode and can double-pop stack variable 0. Preserve the raw
- * variable number here and resolve only the remaining ordinary operands.
- *
- * EXT opcodes use the same internal operand-count bucket as VAR opcodes. Any
- * VAR-table match in this compatibility layer must therefore also require the
- * VARIABLE physical form, otherwise EXT:n can be mistaken for VAR:n.
- */
-static int handle_indirect_variable_opcode(ZMachine *vm,
-                                           const ZMachineInstruction *instruction,
-                                           int *handled)
-{
-    uint8_t variable;
-    uint16_t value;
-
-    *handled = 0;
-    if (!vm || !instruction)
-        return TCL_OK;
-
-    if (instruction->operand_count == ZM_OPERANDS_1OP &&
-        (instruction->opcode_number == 5U ||
-         instruction->opcode_number == 6U ||
-         instruction->opcode_number == 14U)) {
-        *handled = 1;
-        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK)
-            return TCL_ERROR;
-        if (zmachine_variable_read(vm, variable, 1, &value) != TCL_OK)
-            return TCL_ERROR;
-
-        if (instruction->opcode_number == 14U)
-            return store_value(vm, instruction->next_pc, value);
-
-        value = instruction->opcode_number == 5U
-                    ? (uint16_t)(value + 1U)
-                    : (uint16_t)(value - 1U);
-        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
-            return TCL_ERROR;
-        vm->pc = instruction->next_pc;
-        return TCL_OK;
-    }
-
-    if (instruction->operand_count == ZM_OPERANDS_2OP &&
-        (instruction->opcode_number == 4U ||
-         instruction->opcode_number == 5U ||
-         instruction->opcode_number == 13U)) {
-        uint16_t second;
-
-        *handled = 1;
-        if (instruction->operand_count_actual < 2U)
-            return dispatch_error(vm, "indirect 2OP opcode is missing its second operand");
-        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK ||
-            resolve_operand(vm, &instruction->operands[1], &second) != TCL_OK)
-            return TCL_ERROR;
-
-        if (instruction->opcode_number == 13U) {
-            if (zmachine_variable_write(vm, variable, 1, second) != TCL_OK)
-                return TCL_ERROR;
-            vm->pc = instruction->next_pc;
-            return TCL_OK;
-        }
-
-        if (zmachine_variable_read(vm, variable, 1, &value) != TCL_OK)
-            return TCL_ERROR;
-        value = instruction->opcode_number == 5U
-                    ? (uint16_t)(value + 1U)
-                    : (uint16_t)(value - 1U);
-        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
-            return TCL_ERROR;
-
-        return apply_branch(vm, instruction->next_pc,
-                            instruction->opcode_number == 5U
-                                ? (int16_t)value > (int16_t)second
-                                : (int16_t)value < (int16_t)second);
-    }
-
-    if (instruction->form == ZM_FORM_VARIABLE &&
-        instruction->operand_count == ZM_OPERANDS_VAR &&
-        instruction->opcode_number == 9U && vm->version <= 5U) {
-        *handled = 1;
-        if (indirect_variable_number(vm, instruction, &variable) != TCL_OK)
-            return TCL_ERROR;
-        if (zmachine_stack_pop(vm, &value) != TCL_OK)
-            return TCL_ERROR;
-        if (zmachine_variable_write(vm, variable, 1, value) != TCL_OK)
-            return TCL_ERROR;
-        vm->pc = instruction->next_pc;
-        return TCL_OK;
-    }
-
     return TCL_OK;
 }
 
@@ -542,11 +406,6 @@ int zmachine_step(ZMachine *vm)
     }
 
     if (handle_extended_compatibility(vm, &instruction, &handled) != TCL_OK)
-        return TCL_ERROR;
-    if (handled)
-        return TCL_OK;
-
-    if (handle_indirect_variable_opcode(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
     if (handled)
         return TCL_OK;
