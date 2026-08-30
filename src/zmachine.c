@@ -185,6 +185,7 @@ ZMachine *zmachine_create(void)
     Tcl_DStringInit(&vm->pending_input);
     vm->state = ZM_STATE_READY;
     vm->random_state = 1U;
+    vm->output_stream1_enabled = 1;
     return vm;
 }
 
@@ -322,6 +323,10 @@ int zmachine_reset(ZMachine *vm)
     vm->input_available = 0;
     vm->error[0] = '\0';
     vm->random_state = 1U;
+    vm->current_window = 0U;
+    vm->output_stream1_enabled = 1;
+    vm->stream3_depth = 0U;
+    memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
     Tcl_DStringSetLength(&vm->output, 0);
     Tcl_DStringSetLength(&vm->pending_input, 0);
     return TCL_OK;
@@ -451,6 +456,10 @@ static int handle_core_opcode(ZMachine *vm, int *handled)
             vm->frame_count = 0U;
             vm->input_available = 0;
             vm->random_state = 1U;
+            vm->current_window = 0U;
+            vm->output_stream1_enabled = 1;
+            vm->stream3_depth = 0U;
+            memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
             Tcl_DStringSetLength(&vm->pending_input, 0);
             return TCL_OK;
 
@@ -663,11 +672,100 @@ void zmachine_output_clear(ZMachine *vm)
         Tcl_DStringSetLength(&vm->output, 0);
 }
 
-/* Append canonical story text without applying presentation wrapping. */
+/*
+ * Append one ZSCII byte to the innermost active stream-3 memory table.
+ *
+ * The story owns the table capacity, as required by the Z-machine standard,
+ * but the host runtime must still prevent an invalid story from writing beyond
+ * the mapped story image or into static memory. The count word is maintained
+ * continuously; although its contents are unspecified while the stream is
+ * active, this makes nested stream resumption straightforward and leaves the
+ * required final count in place as soon as the stream is deselected.
+ */
+static int output_stream3_append_byte(ZMachine *vm, uint8_t zscii)
+{
+    size_t table;
+    size_t address;
+    uint16_t count;
+
+    if (!vm || !vm->memory || vm->stream3_depth == 0U)
+        return TCL_ERROR;
+
+    table = vm->stream3_tables[vm->stream3_depth - 1U];
+    if (table + 1U >= vm->memory_size ||
+        table + 1U >= (size_t)vm->static_memory_addr) {
+        set_error(vm, "output stream 3 table is outside dynamic memory");
+        return TCL_ERROR;
+    }
+
+    count = read_be16(vm->memory + table);
+    if (count == 0xffffU) {
+        set_error(vm, "output stream 3 character count overflow");
+        return TCL_ERROR;
+    }
+
+    address = table + 2U + (size_t)count;
+    if (address >= vm->memory_size ||
+        address >= (size_t)vm->static_memory_addr) {
+        set_error(vm, "output stream 3 write exceeds dynamic memory");
+        return TCL_ERROR;
+    }
+
+    vm->memory[address] = zscii;
+    ++count;
+    vm->memory[table] = (uint8_t)(count >> 8);
+    vm->memory[table + 1U] = (uint8_t)(count & 0xffU);
+    return TCL_OK;
+}
+
+/*
+ * Append canonical story text at the interpreter output boundary.
+ *
+ * Stream 3 has precedence over every other selected output stream. Canonical
+ * newlines are converted back to ZSCII 13 for the memory table; printable ASCII
+ * is stored directly. A non-ASCII UTF-8 codepoint currently becomes one '?',
+ * matching this runtime's existing fallback until the full ZSCII/Unicode table
+ * is implemented. When stream 3 is inactive, output reaches the Tcl-facing
+ * canonical buffer only while stream 1 is selected.
+ */
 void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
 {
     if (!vm || !text || len == 0U)
         return;
+
+    if (vm->stream3_depth > 0U) {
+        size_t i = 0U;
+
+        while (i < len && vm->state != ZM_STATE_ERROR) {
+            unsigned char ch = (unsigned char)text[i];
+            uint8_t zscii;
+
+            if (ch == (unsigned char)'\n') {
+                zscii = 13U;
+                ++i;
+            } else if (ch >= 32U && ch <= 126U) {
+                zscii = ch;
+                ++i;
+            } else if (ch < 0x80U) {
+                zscii = (uint8_t)'?';
+                ++i;
+            } else {
+                zscii = (uint8_t)'?';
+                ++i;
+                while (i < len &&
+                       (((unsigned char)text[i] & 0xc0U) == 0x80U))
+                    ++i;
+            }
+
+            if (output_stream3_append_byte(vm, zscii) != TCL_OK)
+                return;
+        }
+        return;
+    }
+
+    if (!vm->output_stream1_enabled)
+        return;
+
     Tcl_DStringAppend(&vm->output, text, (int)len);
 }
 
