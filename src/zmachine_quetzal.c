@@ -21,8 +21,8 @@
 
 #define QUETZAL_FORM_HEADER 12U
 #define QUETZAL_IFHD_LENGTH 13U
+#define ZM_STORY_CHECKSUM_START 0x40U
 
-/* Record a persistence error without otherwise changing the live VM state. */
 static int quetzal_error(ZMachine *vm, const char *message)
 {
     if (vm)
@@ -92,7 +92,44 @@ static int write_id(FILE *fp, const char id[4])
     return write_bytes(fp, id, 4U);
 }
 
-/* Validate internal stack bases and compute the exact Quetzal Stks length. */
+/*
+ * Return the checksum used to identify the original story in IFhd.
+ *
+ * V3+ stories normally carry a file length and checksum in their header. V1,
+ * V2, and some early V3 stories do not; Quetzal requires interpreters to
+ * calculate the ordinary story checksum in that case. Dynamic memory may have
+ * changed since loading, so bytes below static_memory_addr come from the
+ * pristine restart image while immutable bytes above it come from story memory.
+ */
+static uint16_t story_identity_checksum(const ZMachine *vm)
+{
+    size_t end;
+    size_t i;
+    uint32_t sum = 0U;
+    int header_checksum_available;
+
+    if (!vm || !vm->memory || !vm->initial_dynamic_memory)
+        return 0U;
+
+    header_checksum_available =
+        vm->version >= 3U && vm->header_file_length_word != 0U;
+    if (header_checksum_available)
+        return vm->checksum;
+
+    end = vm->declared_file_length != 0U ?
+          vm->declared_file_length : vm->memory_size;
+    if (end > vm->memory_size)
+        end = vm->memory_size;
+
+    for (i = ZM_STORY_CHECKSUM_START; i < end; ++i) {
+        if (i < vm->initial_dynamic_memory_size)
+            sum += vm->initial_dynamic_memory[i];
+        else
+            sum += vm->memory[i];
+    }
+    return (uint16_t)sum;
+}
+
 static int stks_length(ZMachine *vm, uint32_t *length_out)
 {
     size_t length;
@@ -107,7 +144,6 @@ static int stks_length(ZMachine *vm, uint32_t *length_out)
     if (top_level_end > vm->sp || top_level_end > 0xffffU)
         return quetzal_error(vm, "invalid top-level stack base for Quetzal save");
 
-    /* Every non-V6 Quetzal Stks chunk begins with an 8-byte dummy frame. */
     length = 8U + 2U * top_level_end;
 
     for (i = 0U; i < vm->frame_count; ++i) {
@@ -159,7 +195,6 @@ static int write_stks(FILE *fp, ZMachine *vm, uint32_t chunk_length)
     if (!write_id(fp, "Stks") || !write_be32(fp, chunk_length))
         return 0;
 
-    /* Mandatory dummy frame containing evaluation stack used at top level. */
     if (!write_be24(fp, 0U) || !write_u8(fp, 0U) ||
         !write_u8(fp, 0U) || !write_u8(fp, 0U) ||
         !write_be16(fp, (uint16_t)top_level_end) ||
@@ -209,6 +244,7 @@ int zmachine_quetzal_save(ZMachine *vm,
     uint32_t umem_len;
     uint64_t form_length;
     const uint8_t *story_header;
+    uint16_t identity_checksum;
     uint8_t pad = 0U;
 
     if (!vm || !vm->memory || !path || !path[0])
@@ -235,13 +271,14 @@ int zmachine_quetzal_save(ZMachine *vm,
         return quetzal_error(vm, "unable to open Quetzal save file for writing");
 
     story_header = vm->initial_dynamic_memory;
+    identity_checksum = story_identity_checksum(vm);
 
     if (!write_id(fp, "FORM") || !write_be32(fp, (uint32_t)form_length) ||
         !write_id(fp, "IFZS") ||
         !write_id(fp, "IFhd") || !write_be32(fp, QUETZAL_IFHD_LENGTH) ||
         !write_be16(fp, vm->release_number) ||
         !write_bytes(fp, story_header + 0x12U, 6U) ||
-        !write_be16(fp, vm->checksum) ||
+        !write_be16(fp, identity_checksum) ||
         !write_be24(fp, saved_pc) ||
         !write_u8(fp, pad) ||
         !write_id(fp, "UMem") || !write_be32(fp, umem_len) ||
@@ -262,7 +299,6 @@ int zmachine_quetzal_save(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Restore interpreter-owned header fields after loading saved dynamic memory. */
 static void preserve_live_header_fields(const ZMachine *vm,
                                         const uint8_t *live,
                                         uint8_t *restored)
@@ -270,10 +306,7 @@ static void preserve_live_header_fields(const ZMachine *vm,
     if (!vm || !live || !restored || vm->static_memory_addr < 0x40U)
         return;
 
-    /* Flags 1 contains interpreter capability bits and is not game-dynamic. */
     restored[0x01U] = live[0x01U];
-
-    /* The complete Flags 2 word explicitly survives restore. */
     restored[0x10U] = live[0x10U];
     restored[0x11U] = live[0x11U];
 
@@ -324,7 +357,6 @@ static int decode_cmem(ZMachine *vm,
         }
     }
 
-    /* An omitted CMem tail means unchanged original story bytes. */
     return TCL_OK;
 }
 
@@ -398,10 +430,6 @@ static int parse_stks(ZMachine *vm,
             }
         }
 
-        /* Dummy frames have no locals; real-frame locals were consumed above. */
-        if (first == 0 && frame_count == 0U)
-            ;
-
         for (i = 0U; i < eval_count; ++i) {
             stack_out[sp++] = read_be16(data + cursor);
             cursor += 2U;
@@ -439,6 +467,7 @@ int zmachine_quetzal_restore(ZMachine *vm,
     size_t sp_temp = 0U;
     size_t frame_count_temp = 0U;
     uint32_t pc;
+    uint16_t identity_checksum;
     int rc = TCL_ERROR;
 
     if (!vm || !vm->memory || !path || !path[0] || !saved_pc)
@@ -537,9 +566,10 @@ int zmachine_quetzal_restore(ZMachine *vm,
         goto done;
     }
 
+    identity_checksum = story_identity_checksum(vm);
     if (read_be16(ifhd) != vm->release_number ||
         memcmp(ifhd + 2U, vm->initial_dynamic_memory + 0x12U, 6U) != 0 ||
-        read_be16(ifhd + 8U) != vm->checksum) {
+        read_be16(ifhd + 8U) != identity_checksum) {
         quetzal_error(vm, "Quetzal save belongs to a different story file");
         goto done;
     }
@@ -574,7 +604,6 @@ int zmachine_quetzal_restore(ZMachine *vm,
                    frames_temp, &frame_count_temp) != TCL_OK)
         goto done;
 
-    /* Interpreter-owned header values survive or are reset from the live VM. */
     preserve_live_header_fields(vm, vm->memory, dynamic);
 
     memcpy(vm->memory, dynamic, vm->static_memory_addr);
