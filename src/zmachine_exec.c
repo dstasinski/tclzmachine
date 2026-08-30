@@ -634,7 +634,11 @@ int zmachine_step(ZMachine *vm)
         }
     }
 
-    if (instruction.operand_count == ZM_OPERANDS_VAR) {
+    /* EXTENDED instructions share the decoder's VAR operand-count bucket but
+     * belong to a distinct opcode table. Keep them out of ordinary VAR
+     * dispatch until their EXT handlers are implemented explicitly. */
+    if (instruction.form != ZM_FORM_EXTENDED &&
+        instruction.operand_count == ZM_OPERANDS_VAR) {
         switch (instruction.opcode_number) {
         case 0U: return execute_call(vm, &instruction, values, 0);
         case 1U: {
