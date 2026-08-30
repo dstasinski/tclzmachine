@@ -34,7 +34,10 @@ typedef enum ZMachineRunState {
     ZM_STATE_READY = 0,
     ZM_STATE_WAITING_INPUT,
     ZM_STATE_HALTED,
-    ZM_STATE_ERROR
+    ZM_STATE_ERROR,
+    /* Cooperative host-file requests; appended to preserve existing values. */
+    ZM_STATE_WAITING_SAVE,
+    ZM_STATE_WAITING_RESTORE
 } ZMachineRunState;
 
 /*
@@ -47,7 +50,7 @@ struct ZMachine {
     uint8_t *memory;
     size_t memory_size;
 
-    /* Original dynamic-memory bytes retained for the restart opcode. */
+    /* Original dynamic-memory bytes retained for restart and Quetzal CMem. */
     uint8_t *initial_dynamic_memory;
     size_t initial_dynamic_memory_size;
 
@@ -79,6 +82,13 @@ struct ZMachine {
     size_t sp;
     ZMachineFrame frames[ZM_MAX_FRAMES];
     size_t frame_count;
+
+    /*
+     * Quetzal save/restore opcodes yield to Tcl for filename policy. The saved
+     * address points at the save/restore branch record in V1-V3 or store byte
+     * in V4+, exactly as required for completing the opcode after host I/O.
+     */
+    uint32_t pending_file_pc;
 
     /* Per-session pseudo-random generator state used by the random opcode. */
     uint32_t random_state;
@@ -119,9 +129,13 @@ void zmachine_destroy(ZMachine *vm);
 int zmachine_load_story(ZMachine *vm, const char *path);
 int zmachine_reset(ZMachine *vm);
 
-/* Queue one command and execute until another input request, halt, or error. */
+/* Queue one command and execute until another input/file request, halt, or error. */
 int zmachine_supply_input(ZMachine *vm, const char *line);
 int zmachine_run(ZMachine *vm);
+
+/* Complete a cooperative story save/restore request using a host path. */
+int zmachine_save_file(ZMachine *vm, const char *path);
+int zmachine_restore_file(ZMachine *vm, const char *path);
 
 /* Version-aware packed-address conversion helpers. */
 uint32_t zmachine_unpack_routine_address(const ZMachine *vm, uint16_t packed);
