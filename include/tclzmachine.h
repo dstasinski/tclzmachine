@@ -26,6 +26,9 @@ extern "C" {
 #define TCLZMACHINE_TEXT_ONLY 1
 #define ZM_MAX_STREAM3_DEPTH 16U
 
+/* Opaque heap-owned cache used only after a story requests save_undo. */
+typedef struct ZMachineUndoState ZMachineUndoState;
+
 /* Coarse execution state visible to the Tcl-facing session layer. */
 typedef enum ZMachineRunState {
     ZM_STATE_READY = 0,
@@ -47,6 +50,9 @@ struct ZMachine {
     /* Original dynamic-memory bytes retained for the restart opcode. */
     uint8_t *initial_dynamic_memory;
     size_t initial_dynamic_memory_size;
+
+    /* Optional one-level in-memory save used by EXT:9/EXT:10 undo opcodes. */
+    ZMachineUndoState *undo_state;
 
     /* Cached fields from the story-file header. */
     uint8_t version;
