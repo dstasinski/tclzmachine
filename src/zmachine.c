@@ -11,6 +11,7 @@
 #include "zmachine_decode.h"
 #include "zmachine_exec.h"
 #include "zmachine_input.h"
+#include "zmachine_undo.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,6 +196,7 @@ void zmachine_destroy(ZMachine *vm)
     if (!vm)
         return;
 
+    zmachine_undo_discard(vm);
     free(vm->initial_dynamic_memory);
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
@@ -262,6 +264,8 @@ int zmachine_load_story(ZMachine *vm, const char *path)
         return TCL_ERROR;
     }
 
+    /* An undo snapshot belongs only to the story image that created it. */
+    zmachine_undo_discard(vm);
     free(vm->memory);
     vm->memory = buf;
     vm->memory_size = (size_t)size;
@@ -316,6 +320,7 @@ int zmachine_reset(ZMachine *vm)
         return TCL_ERROR;
     }
 
+    zmachine_undo_discard(vm);
     vm->pc = vm->initial_pc;
     vm->sp = 0;
     vm->frame_count = 0;
@@ -442,15 +447,24 @@ static int handle_core_opcode(ZMachine *vm, int *handled)
 
     if (instruction.operand_count == ZM_OPERANDS_0OP) {
         switch (instruction.opcode_number) {
-        case 7U: /* restart */
+        case 7U: { /* restart */
+            uint16_t preserved_flags2;
+
             *handled = 1;
             if (!vm->initial_dynamic_memory ||
                 vm->initial_dynamic_memory_size != vm->static_memory_addr) {
                 set_error(vm, "restart image is unavailable");
                 return TCL_ERROR;
             }
+
+            preserved_flags2 = read_be16(vm->memory + 0x10U);
             memcpy(vm->memory, vm->initial_dynamic_memory,
                    vm->initial_dynamic_memory_size);
+            vm->memory[0x10U] = (uint8_t)(preserved_flags2 >> 8);
+            vm->memory[0x11U] = (uint8_t)preserved_flags2;
+            vm->flags2 = preserved_flags2;
+
+            zmachine_undo_discard(vm);
             vm->pc = vm->initial_pc;
             vm->sp = 0U;
             vm->frame_count = 0U;
@@ -462,6 +476,7 @@ static int handle_core_opcode(ZMachine *vm, int *handled)
             memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
             Tcl_DStringSetLength(&vm->pending_input, 0);
             return TCL_OK;
+        }
 
         case 9U: /* pop in V1-V4; V5+ uses catch instead. */
             if (vm->version <= 4U) {
