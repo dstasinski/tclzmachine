@@ -14,9 +14,11 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_decode.c
     src/zmachine_dispatch.c
     src/zmachine_exec.c
+    src/zmachine_file.c
     src/zmachine_input.c
     src/zmachine_object.c
     src/zmachine_property.c
+    src/zmachine_quetzal.c
     src/zmachine_state.c
     src/zmachine_text.c
     src/zmachine_undo.c
@@ -25,13 +27,18 @@ set(TCLZMACHINE_VM_SOURCES
 )
 
 #
-# zmachine_dispatch.c owns the public zmachine_step() entry point so it can
-# consume presentation-only instructions before delegating ordinary VM work.
-# Rename the implementation in zmachine_exec.c at compile time rather than
-# duplicating or weakening the executor's public API contract.
+# Instruction execution is layered so each module owns one concern:
+#   zmachine_file.c       public zmachine_step(), cooperative file requests
+#   zmachine_dispatch.c   presentation/text-only compatibility wrapper
+#   zmachine_exec.c       ordinary core opcode executor
+# Rename the two lower implementations at compile time rather than duplicating
+# their APIs or mixing file/presentation policy into the core executor.
 #
 set_source_files_properties(src/zmachine_exec.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core"
+)
+set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
 )
 
 add_library(tclzmachine SHARED
@@ -112,6 +119,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(undo-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(undo-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME undo-state COMMAND undo-test)
+
+    add_executable(quetzal-test tests/quetzal.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(quetzal-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(quetzal-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME quetzal-save-restore COMMAND quetzal-test)
 
     add_executable(wrap-test tests/wrap.c src/zmachine_wrap.c)
     target_include_directories(wrap-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
