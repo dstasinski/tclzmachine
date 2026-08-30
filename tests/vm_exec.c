@@ -96,44 +96,26 @@ int main(void)
     {
         ZMachine vm;
         ZMachineInstruction insn;
-        uint16_t values[2];
+        uint16_t values[1];
 
         init_vm(&vm, 5U, 512U);
         assert(zmachine_stack_push(&vm, 0x1111U) == TCL_OK);
-        assert(zmachine_stack_push(&vm, 0x2222U) == TCL_OK);
+        assert(zmachine_stack_push(&vm, 0U) == TCL_OK);
 
-        /* 1OP load: operand zero is the variable number, not its value. */
+        /*
+         * Even for a variable-by-reference opcode, a Variable-type operand is
+         * first evaluated by value. Here stack variable 0 supplies target
+         * variable number 0, so operand resolution pops only that target number.
+         */
         memset(&insn, 0, sizeof(insn));
         insn.operand_count = ZM_OPERANDS_1OP;
         insn.opcode_number = 14U;
         insn.operand_count_actual = 1U;
         insn.operands[0].type = ZM_OPERAND_VARIABLE;
         insn.operands[0].value = 0U;
-        assert(zmachine_resolve_operands(&vm, &insn, values, 2U) == TCL_OK);
-        assert(values[0] == 0U && vm.sp == 2U);
-
-        /* 2OP dec_chk: later operands still resolve normally left-to-right. */
-        memset(&insn, 0, sizeof(insn));
-        insn.operand_count = ZM_OPERANDS_2OP;
-        insn.opcode_number = 4U;
-        insn.operand_count_actual = 2U;
-        insn.operands[0].type = ZM_OPERAND_VARIABLE;
-        insn.operands[0].value = 0U;
-        insn.operands[1].type = ZM_OPERAND_SMALL_CONSTANT;
-        insn.operands[1].value = 7U;
-        assert(zmachine_resolve_operands(&vm, &insn, values, 2U) == TCL_OK);
-        assert(values[0] == 0U && values[1] == 7U && vm.sp == 2U);
-
-        /* VAR:9 pull in V1-V5 has the same indirect operand-zero rule. */
-        memset(&insn, 0, sizeof(insn));
-        insn.form = ZM_FORM_VARIABLE;
-        insn.operand_count = ZM_OPERANDS_VAR;
-        insn.opcode_number = 9U;
-        insn.operand_count_actual = 1U;
-        insn.operands[0].type = ZM_OPERAND_VARIABLE;
-        insn.operands[0].value = 0U;
-        assert(zmachine_resolve_operands(&vm, &insn, values, 2U) == TCL_OK);
-        assert(values[0] == 0U && vm.sp == 2U);
+        assert(zmachine_resolve_operands(&vm, &insn, values, 1U) == TCL_OK);
+        assert(values[0] == 0U);
+        assert(vm.sp == 1U && vm.stack[0] == 0x1111U);
 
         free_vm(&vm);
     }
@@ -142,28 +124,52 @@ int main(void)
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
 
-        /* inc variable 0 must replace the top stack value without popping it. */
+        /* A small-constant 0 directly names stack variable 0. */
         assert(zmachine_stack_push(&vm, 0x1111U) == TCL_OK);
         vm.pc = 0x20U;
-        vm.memory[0x20] = 0xA5U; /* 1OP:5 inc, variable operand */
+        vm.memory[0x20] = 0x95U; /* 1OP:5 inc, small-constant operand */
         vm.memory[0x21] = 0U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x22U && vm.sp == 1U && vm.stack[0] == 0x1112U);
 
-        /* load variable 0 peeks the stack and stores the value elsewhere. */
-        vm.memory[0x22] = 0xAEU; /* 1OP:14 load, variable operand */
+        /*
+         * A Variable-type operand 0 is evaluated first. Its popped value is the
+         * target variable number, after which target variable 0 is still
+         * modified in place rather than popped or pushed.
+         */
+        assert(zmachine_stack_push(&vm, 0U) == TCL_OK);
+        vm.memory[0x22] = 0xA5U; /* 1OP:5 inc, Variable-type operand */
         vm.memory[0x23] = 0U;
-        vm.memory[0x24] = 0x10U;
         assert(zmachine_step(&vm) == TCL_OK);
-        assert(vm.pc == 0x25U && vm.sp == 1U && vm.stack[0] == 0x1112U);
-        assert(read_global(&vm, 0x10U) == 0x1112U);
+        assert(vm.pc == 0x24U && vm.sp == 1U && vm.stack[0] == 0x1113U);
 
-        /* 2OP:13 store indirectly replaces stack variable 0. */
-        vm.memory[0x25] = 0x4DU; /* first operand variable, second small */
-        vm.memory[0x26] = 0U;
-        vm.memory[0x27] = 0x2AU;
+        /* load with a direct target 0 peeks stack variable 0. */
+        vm.memory[0x24] = 0x9EU; /* 1OP:14 load, small constant */
+        vm.memory[0x25] = 0U;
+        vm.memory[0x26] = 0x10U;
         assert(zmachine_step(&vm) == TCL_OK);
-        assert(vm.pc == 0x28U && vm.sp == 1U && vm.stack[0] == 0x002AU);
+        assert(vm.pc == 0x27U && vm.sp == 1U && vm.stack[0] == 0x1113U);
+        assert(read_global(&vm, 0x10U) == 0x1113U);
+
+        /* store with a direct target 0 replaces stack variable 0 in place. */
+        vm.memory[0x27] = 0x0DU; /* 2OP:13 store, small/small */
+        vm.memory[0x28] = 0U;
+        vm.memory[0x29] = 0x2AU;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x2AU && vm.sp == 1U && vm.stack[0] == 0x002AU);
+
+        /*
+         * VAR:9 pull with a Variable-type stack operand first pops target
+         * variable number 0, then pulls the value, then replaces the new top.
+         */
+        vm.stack[0] = 0x1111U;
+        assert(zmachine_stack_push(&vm, 0x2222U) == TCL_OK);
+        assert(zmachine_stack_push(&vm, 0U) == TCL_OK);
+        vm.memory[0x2A] = 0xE9U;
+        vm.memory[0x2B] = 0xBFU;
+        vm.memory[0x2C] = 0U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x2DU && vm.sp == 1U && vm.stack[0] == 0x2222U);
 
         free_vm(&vm);
     }
