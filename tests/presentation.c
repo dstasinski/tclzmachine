@@ -3,9 +3,9 @@
  *
  * Regression tests for presentation-only Z-machine opcodes which tclzmachine
  * intentionally reduces to no-ops in its stream-oriented text frontend, plus
- * the text-only read_char policy used for non-interactive IRC sessions.
+ * the cooperative read_char policy used by non-interactive Tcl/IRC sessions.
  * These tests verify instruction advancement, operand-evaluation side effects,
- * and deterministic single-character input behavior.
+ * input suspension, and explicit character delivery.
  */
 
 #include "tclzmachine.h"
@@ -63,7 +63,7 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x23U && vm.state == ZM_STATE_READY);
 
-    /* VAR:11 set_window is likewise irrelevant to a single output stream. */
+    /* VAR:11 set_window is likewise only a presentation selection. */
     vm.memory[0x23] = 0xEBU;
     vm.memory[0x24] = 0x7FU;
     vm.memory[0x25] = 0U;
@@ -77,42 +77,58 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x29U && vm.state == ZM_STATE_READY);
 
-    /* VAR:17 set_text_style small-constant operand. */
-    vm.memory[0x29] = 0xF1U;
-    vm.memory[0x2A] = 0x7FU;
-    vm.memory[0x2B] = 2U;
+    /* VAR:15 set_cursor has two coordinates but no textual effect. */
+    vm.memory[0x29] = 0xEFU;
+    vm.memory[0x2A] = 0x5FU; /* two small constants, then omitted operands */
+    vm.memory[0x2B] = 1U;
+    vm.memory[0x2C] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x2CU && vm.state == ZM_STATE_READY);
+    assert(vm.pc == 0x2DU && vm.state == ZM_STATE_READY);
+
+    /* VAR:17 set_text_style small-constant operand. */
+    vm.memory[0x2D] = 0xF1U;
+    vm.memory[0x2E] = 0x7FU;
+    vm.memory[0x2F] = 2U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x30U && vm.state == ZM_STATE_READY);
 
     /* VAR:18 buffer_mode small-constant operand. */
-    vm.memory[0x2C] = 0xF2U;
-    vm.memory[0x2D] = 0x7FU;
-    vm.memory[0x2E] = 1U;
+    vm.memory[0x30] = 0xF2U;
+    vm.memory[0x31] = 0x7FU;
+    vm.memory[0x32] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x2FU && vm.state == ZM_STATE_READY);
+    assert(vm.pc == 0x33U && vm.state == ZM_STATE_READY);
 
     /*
      * A no-op still evaluates variable operands. Variable 0 is the stack, so
      * this erase_window encoding must pop one value before advancing the PC.
      */
     assert(zmachine_stack_push(&vm, 0xFFFFU) == TCL_OK);
-    vm.memory[0x2F] = 0xEDU;
-    vm.memory[0x30] = 0xBFU;
-    vm.memory[0x31] = 0U;
+    vm.memory[0x33] = 0xEDU;
+    vm.memory[0x34] = 0xBFU;
+    vm.memory[0x35] = 0U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x32U && vm.sp == 0U);
+    assert(vm.pc == 0x36U && vm.sp == 0U);
 
     /*
-     * VAR:22 read_char stores a printable synthetic key (space, ZSCII 32) in
-     * text-only mode. This avoids games which reject carriage return while
-     * still preserving a queued Tcl line for a later line-oriented read.
+     * VAR:22 read_char first suspends with the PC unchanged because no input
+     * has been queued.  Supplying "x" then satisfies the same instruction,
+     * stores ASCII/ZSCII x, consumes that queued character response, and
+     * advances past the store variable.
      */
-    vm.memory[0x32] = 0xF6U;
-    vm.memory[0x33] = 0x7FU;
-    vm.memory[0x34] = 1U;
-    vm.memory[0x35] = 0x10U;
+    vm.memory[0x36] = 0xF6U;
+    vm.memory[0x37] = 0x7FU;
+    vm.memory[0x38] = 1U;
+    vm.memory[0x39] = 0x10U;
+
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x36U && read_global(&vm, 0x10U) == 32U);
+    assert(vm.pc == 0x36U && vm.state == ZM_STATE_WAITING_INPUT);
+
+    assert(zmachine_supply_input(&vm, "x") == TCL_OK);
+    assert(vm.state == ZM_STATE_READY);
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x3AU && read_global(&vm, 0x10U) == (uint16_t)'x');
+    assert(vm.input_available == 0);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
