@@ -144,12 +144,13 @@ int main(void)
     vm.memory[0x84] = (uint8_t)'A';
     vm.memory[0x85] = 11U;
     vm.memory[0x86] = 137U;
-    vm.memory[0x87] = (uint8_t)'B';
+    vm.memory[0x87] = 253U;
+    vm.memory[0x88] = (uint8_t)'B';
     vm.memory[0x4A] = 0xFEU;
     vm.memory[0x4B] = 0x1FU;
     vm.memory[0x4C] = 0x00U;
     vm.memory[0x4D] = 0x84U;
-    vm.memory[0x4E] = 4U;
+    vm.memory[0x4E] = 5U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x4FU);
     assert(strcmp(Tcl_DStringValue(&vm.output), "AB") == 0);
@@ -178,16 +179,27 @@ int main(void)
     assert(vm.stack[0] == 0x2222U);
 
     /*
-     * EXT:9 shares opcode number 9 and the decoder's VAR operand-count bucket,
-     * but it belongs to the extended opcode table. It must reach the core
-     * executor instead of being mistaken for VAR:9 pull.
+     * EXT:9 is save_undo, not VAR:9 pull. Until the runtime provides a complete
+     * undo snapshot, the standard permits it to store -1. The opcode must not
+     * consume the evaluation stack merely because it shares opcode number 9.
      */
     vm.memory[0x56] = 0xBEU;
     vm.memory[0x57] = 9U;
     vm.memory[0x58] = 0xFFU; /* no operands */
-    assert(zmachine_step(&vm) == TCL_ERROR);
-    assert(strstr(vm.error, "indirect-variable") == NULL);
-    assert(strstr(vm.error, "unsupported Z-machine opcode") != NULL);
+    vm.memory[0x59] = 0x12U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x5AU);
+    assert(vm.sp == 1U && vm.stack[0] == 0x2222U);
+    assert(read_global(&vm, 0x12U) == 0xFFFFU);
+
+    /* No successful save_undo exists, so restore_undo reports failure. */
+    vm.memory[0x5A] = 0xBEU;
+    vm.memory[0x5B] = 10U;
+    vm.memory[0x5C] = 0xFFU; /* no operands */
+    vm.memory[0x5D] = 0x13U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x5EU);
+    assert(read_global(&vm, 0x13U) == 0U);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
