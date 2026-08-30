@@ -4,30 +4,21 @@
  * Text-only presentation-policy wrapper around the core opcode executor.
  *
  * The Z-machine includes several instructions whose only purpose is to alter
- * the visual presentation of text on a terminal. tclzmachine deliberately
- * has no screen, windows, cursor, colours, or font state because its primary
- * frontend is a Tcl/IRC request-response interface. Supported presentation
- * opcodes which have no meaningful textual effect are therefore consumed here
- * as text-only no-ops, while all ordinary VM instructions are delegated to
- * the core executor in zmachine_exec.c.
+ * visual terminal presentation. tclzmachine has no screen, cursor, colours,
+ * or font state because its primary frontend is a Tcl/IRC request-response
+ * interface. Presentation operations which have no meaningful textual effect
+ * are therefore consumed here, while ordinary VM instructions are delegated
+ * to the core executor in zmachine_exec.c.
  *
- * Character input is also adapted here.  VAR:22 read_char is a real input
- * operation, not a presentation hint, so fabricating a key can trap a story in
- * a menu loop.  Instead, read_char participates in the same cooperative input
- * model as line input: with no queued Tcl input the VM enters WAITING_INPUT;
- * when input is queued, the first byte supplies the character and that queued
- * item is consumed as a character-input response rather than a line command.
- *
- * Keeping this policy in a separate translation unit prevents screen-specific
- * compatibility decisions from becoming mixed into object, arithmetic,
- * routine, and memory semantics. CMake compiles zmachine_exec.c with its
- * public zmachine_step symbol renamed to zmachine_step_core; this file exports
- * the public zmachine_step wrapper used by the rest of the interpreter.
+ * Character input is also adapted here. VAR:22 read_char participates in the
+ * cooperative input model: the VM suspends when no character is available and
+ * resumes when the next Tcl command supplies that character.
  */
 
 #include "tclzmachine.h"
 #include "zmachine_decode.h"
 #include "zmachine_exec.h"
+#include "zmachine_text.h"
 
 #include <stdio.h>
 
@@ -53,9 +44,6 @@ static int dispatch_error(ZMachine *vm, const char *message)
  * VAR:15 set_cursor changes only cursor placement.
  * VAR:17 set_text_style changes visual style only.
  * VAR:18 buffer_mode controls terminal-side line buffering/word wrapping.
- *
- * tclzmachine performs optional wrapping at the Tcl output boundary instead,
- * so none of these instructions should modify canonical VM text output.
  */
 static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
@@ -78,16 +66,139 @@ static int is_text_only_noop(const ZMachine *vm,
 }
 
 /*
+ * Handle VAR:19 output_stream.
+ *
+ * Streams 1, 2 and 4 are host/presentation facilities and are only tracked or
+ * accepted by this text-only runtime. Stream 3 is semantically significant to
+ * story code, so its destination-table nesting is retained per session. The
+ * actual memory capture path is deliberately isolated from this dispatcher and
+ * can be completed without changing opcode decoding or session semantics.
+ */
+static int handle_output_stream(ZMachine *vm,
+                                const ZMachineInstruction *instruction,
+                                int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+    int16_t stream;
+
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 3U ||
+        instruction->operand_count != ZM_OPERANDS_VAR ||
+        instruction->opcode_number != 19U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (instruction->operand_count_actual < 1U)
+        return dispatch_error(vm, "output_stream is missing its stream operand");
+
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    stream = (int16_t)values[0];
+    if (stream == 0) {
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    if (stream == 1 || stream == -1) {
+        vm->output_stream1_enabled = stream > 0;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    /* Transcript (2) and command recording (4) have no IRC-side destination. */
+    if (stream == 2 || stream == -2 || stream == 4 || stream == -4) {
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    if (stream == 3) {
+        uint16_t table;
+        if (instruction->operand_count_actual < 2U)
+            return dispatch_error(vm, "output_stream 3 is missing its table operand");
+        if (vm->stream3_depth >= ZM_MAX_STREAM3_DEPTH)
+            return dispatch_error(vm, "output_stream 3 nesting limit exceeded");
+        table = values[1];
+        if ((size_t)table + 1U >= vm->memory_size ||
+            (size_t)table + 1U >= (size_t)vm->static_memory_addr)
+            return dispatch_error(vm, "output_stream 3 table is outside dynamic memory");
+        vm->memory[table] = 0U;
+        vm->memory[table + 1U] = 0U;
+        vm->stream3_tables[vm->stream3_depth++] = table;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    if (stream == -3) {
+        if (vm->stream3_depth == 0U)
+            return dispatch_error(vm, "output_stream -3 without active stream 3");
+        --vm->stream3_depth;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    return dispatch_error(vm, "unsupported Z-machine output stream number");
+}
+
+/*
+ * Handle VAR:30 print_table as plain textual rows.
+ *
+ * Cursor positioning is intentionally discarded, but the ZSCII bytes remain
+ * meaningful text. Rows are emitted in order with newlines between them; the
+ * optional skip operand advances over unused bytes between source rows.
+ */
+static int handle_print_table(ZMachine *vm,
+                              const ZMachineInstruction *instruction,
+                              int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+    uint32_t address;
+    uint16_t width, height, skip;
+    uint16_t row, column;
+
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 5U ||
+        instruction->operand_count != ZM_OPERANDS_VAR ||
+        instruction->opcode_number != 30U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (instruction->operand_count_actual < 2U)
+        return dispatch_error(vm, "print_table requires address and width operands");
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    address = values[0];
+    width = values[1];
+    height = instruction->operand_count_actual >= 3U ? values[2] : 1U;
+    skip = instruction->operand_count_actual >= 4U ? values[3] : 0U;
+
+    for (row = 0U; row < height; ++row) {
+        for (column = 0U; column < width; ++column) {
+            if ((size_t)address >= vm->memory_size)
+                return dispatch_error(vm, "print_table reads outside story memory");
+            if (zmachine_text_output_zscii(vm, vm->memory[address++]) != TCL_OK)
+                return TCL_ERROR;
+        }
+        if (row + 1U < height &&
+            zmachine_text_output_zscii(vm, 13U) != TCL_OK)
+            return TCL_ERROR;
+        address += skip;
+    }
+
+    vm->pc = instruction->next_pc;
+    return TCL_OK;
+}
+
+/*
  * Handle VAR:22 read_char using cooperative Tcl input.
  *
  * A call which reaches read_char without queued input suspends at the opcode
- * with the PC unchanged.  On the next zmachine::command call, the first byte
- * of the supplied Tcl string is returned as the ZSCII character.  The entire
- * queued item is then consumed because it answered a character request, not a
- * line request.  An empty supplied string represents carriage return.
- *
- * Timed read_char operands are not yet implemented; nonzero timeout/routine
- * operands are rejected rather than silently changing game timing semantics.
+ * with the PC unchanged. On the next zmachine::command call, the first byte of
+ * the supplied Tcl string is returned as the ZSCII character. The entire
+ * queued item is then consumed because it answered a character request.
  */
 static int handle_read_char(ZMachine *vm,
                             const ZMachineInstruction *instruction,
@@ -106,7 +217,6 @@ static int handle_read_char(ZMachine *vm,
         return TCL_OK;
 
     *handled = 1;
-
     if (instruction->operand_count_actual < 1U)
         return dispatch_error(vm, "read_char is missing its input-device operand");
 
@@ -118,15 +228,12 @@ static int handle_read_char(ZMachine *vm,
     if (zmachine_resolve_operands(vm, instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
-
     if (values[0] != 1U)
         return dispatch_error(vm, "read_char requested an unsupported input device");
-
     if (instruction->operand_count_actual >= 2U && values[1] != 0U)
         return dispatch_error(vm, "timed read_char is not yet supported");
     if (instruction->operand_count_actual >= 3U && values[2] != 0U)
         return dispatch_error(vm, "timed read_char callback is not yet supported");
-
     if ((size_t)instruction->next_pc >= vm->memory_size)
         return dispatch_error(vm, "truncated read_char store variable");
 
@@ -149,15 +256,7 @@ static int handle_read_char(ZMachine *vm,
     return TCL_OK;
 }
 
-/*
- * Execute one instruction, intercepting text-only presentation and character
- * input policy before ordinary opcode dispatch.
- *
- * Even a discarded presentation instruction must have its operands evaluated:
- * a variable operand may name stack variable 0, whose read has the observable
- * side effect of popping the evaluation stack. We therefore use the normal
- * left-to-right operand resolver before advancing past a text-only no-op.
- */
+/* Execute one instruction through the text-only compatibility layer. */
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -180,17 +279,25 @@ int zmachine_step(ZMachine *vm)
     if (handled)
         return TCL_OK;
 
+    if (handle_output_stream(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
+
+    if (handle_print_table(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
+
     if (!is_text_only_noop(vm, &instruction))
         return zmachine_step_core(vm);
 
     if (instruction.operand_count_actual < 1U)
         return dispatch_error(vm, "presentation opcode is missing its operand");
-
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
 
-    /* Values are intentionally ignored after their required evaluation. */
     (void)values;
     vm->pc = instruction.next_pc;
     return TCL_OK;
