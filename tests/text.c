@@ -15,6 +15,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     vm->version = version;
     vm->static_memory_addr = (uint16_t)size;
     vm->state = ZM_STATE_READY;
+    vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
 }
