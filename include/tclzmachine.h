@@ -24,6 +24,7 @@ extern "C" {
 
 #define TCLZMACHINE_VERSION "0.2.0"
 #define TCLZMACHINE_TEXT_ONLY 1
+#define ZM_MAX_STREAM3_DEPTH 16U
 
 /* Coarse execution state visible to the Tcl-facing session layer. */
 typedef enum ZMachineRunState {
@@ -79,13 +80,24 @@ struct ZMachine {
     /*
      * Minimal presentation state retained by the text-only frontend.
      *
-     * Z-machine windows 1 and above are presentation/status regions.  The IRC
+     * Z-machine windows 1 and above are presentation/status regions. The IRC
      * runtime does not expose their cursor or layout data, so text written to a
      * nonzero window is discarded rather than mixed into narrative output.
      */
     uint8_t current_window;
 
-    /* Canonical output and one queued line of player input. */
+    /*
+     * Output-stream state required by VAR:19 output_stream. Stream 1 is the
+     * ordinary screen/text stream and is enabled by default after reset. Stream
+     * 3 may be nested; each entry stores the destination table address for a
+     * memory-capture stream. The actual byte capture is kept separate from
+     * presentation policy so later revisions can make it fully spec-complete.
+     */
+    int output_stream1_enabled;
+    uint16_t stream3_tables[ZM_MAX_STREAM3_DEPTH];
+    size_t stream3_depth;
+
+    /* Canonical output and one queued line/character of player input. */
     Tcl_DString output;
     Tcl_DString pending_input;
     int input_available;
