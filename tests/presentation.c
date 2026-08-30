@@ -3,8 +3,9 @@
  *
  * Regression tests for presentation-oriented Z-machine behavior adapted to
  * the stream-oriented Tcl/IRC frontend. These tests cover layout no-ops,
- * cooperative character input, output-stream bookkeeping, and print_table
- * conversion to plain text.
+ * cooperative character input, output-stream bookkeeping, print_table
+ * conversion to plain text, and narrow legacy-compatibility cases handled by
+ * the presentation dispatcher.
  */
 
 #include "tclzmachine.h"
@@ -149,6 +150,35 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x4AU);
     assert(strcmp(Tcl_DStringValue(&vm.output), "AB\nCD") == 0);
+
+    /*
+     * Legacy screen tables may contain low undefined controls as padding.
+     * print_table alone ignores them instead of weakening general ZSCII output.
+     */
+    Tcl_DStringSetLength(&vm.output, 0);
+    vm.memory[0x84] = (uint8_t)'A';
+    vm.memory[0x85] = 1U;
+    vm.memory[0x86] = (uint8_t)'B';
+    vm.memory[0x4A] = 0xFEU;
+    vm.memory[0x4B] = 0x1FU; /* large address, small width, then omitted */
+    vm.memory[0x4C] = 0x00U;
+    vm.memory[0x4D] = 0x84U;
+    vm.memory[0x4E] = 3U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x4FU);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "AB") == 0);
+
+    /*
+     * get_child 0 treats the null object as having no child. The result is
+     * stored as zero and a branch-on-true record is therefore not taken.
+     */
+    vm.memory[0x4F] = 0x92U; /* 1OP:2, small-constant operand */
+    vm.memory[0x50] = 0U;    /* object zero */
+    vm.memory[0x51] = 0x11U; /* store global 17 */
+    vm.memory[0x52] = 0xC2U; /* branch on true, short offset 2 */
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x53U);
+    assert(read_global(&vm, 0x11U) == 0U);
 
     free_vm(&vm);
     puts("presentation opcode tests passed");
