@@ -11,6 +11,7 @@
  */
 
 #include "tclzmachine.h"
+#include "zmachine_decode.h"
 #include "zmachine_wrap.h"
 
 #include <stdlib.h>
@@ -171,10 +172,32 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
         if (message && message[0] != '\0') {
             Tcl_SetObjResult(interp, Tcl_NewStringObj(message, -1));
         } else {
-            Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d)",
-                              (unsigned long)s->vm->pc,
-                              (int)s->vm->state));
+            ZMachineInstruction instruction;
+            char decode_error[128];
+
+            decode_error[0] = '\0';
+            if (zmachine_decode_instruction(s->vm->memory,
+                                            s->vm->memory_size,
+                                            s->vm->version,
+                                            s->vm->pc,
+                                            &instruction,
+                                            decode_error,
+                                            sizeof(decode_error))) {
+                Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d): form=%u count=%u opcode=%u operands=%u",
+                                  (unsigned long)s->vm->pc,
+                                  (int)s->vm->state,
+                                  (unsigned)instruction.form,
+                                  (unsigned)instruction.operand_count,
+                                  (unsigned)instruction.opcode_number,
+                                  (unsigned)instruction.operand_count_actual));
+            } else {
+                Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("Z-machine command failed at pc 0x%lx (state %d): decode failed: %s",
+                                  (unsigned long)s->vm->pc,
+                                  (int)s->vm->state,
+                                  decode_error[0] ? decode_error : "unknown decode error"));
+            }
         }
         return TCL_ERROR;
     }
