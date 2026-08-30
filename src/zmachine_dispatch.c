@@ -19,6 +19,7 @@
 #include "zmachine_decode.h"
 #include "zmachine_exec.h"
 #include "zmachine_text.h"
+#include "zmachine_undo.h"
 
 #include <stdio.h>
 
@@ -52,34 +53,54 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 }
 
 /*
- * Handle extended opcodes whose optional host capability is not yet provided.
+ * Handle the in-memory undo opcodes from the EXT table.
  *
- * EXT:9 save_undo is explicitly allowed to return -1 when the interpreter
- * cannot provide an in-memory undo cache. EXT:10 restore_undo returns failure
- * deterministically here because no successful save_undo can have occurred.
- * Keeping this narrow behavior separate avoids pretending to provide undo
- * state until a complete per-session snapshot implementation is available.
+ * save_undo snapshots the state before storing its immediate result. That is
+ * important when the destination is variable 0: a later restore must recreate
+ * the pre-store stack and push 2, not retain the original 1 and push 2 again.
+ * Allocation failure is reported as -1, which is the standard capability-
+ * unavailable result. restore_undo with no cached state retains the project's
+ * previous deterministic failure result of 0; successful restore transfers
+ * control back to the saved save_undo continuation.
  */
-static int handle_extended_compatibility(ZMachine *vm,
-                                         const ZMachineInstruction *instruction,
-                                         int *handled)
+static int handle_extended_undo(ZMachine *vm,
+                                const ZMachineInstruction *instruction,
+                                int *handled)
 {
+    int undo_result;
+
     *handled = 0;
     if (!vm || !instruction || vm->version < 5U ||
         instruction->form != ZM_FORM_EXTENDED)
         return TCL_OK;
 
     if (instruction->opcode_number == 9U) {
+        uint8_t store_variable;
+
         *handled = 1;
         if (instruction->operand_count_actual != 0U)
             return dispatch_error(vm, "save_undo does not accept operands");
-        return store_value(vm, instruction->next_pc, 0xffffU);
+        if ((size_t)instruction->next_pc >= vm->memory_size)
+            return dispatch_error(vm, "truncated save_undo store variable");
+
+        store_variable = vm->memory[instruction->next_pc];
+        undo_result = zmachine_undo_save(vm,
+                                         instruction->next_pc + 1U,
+                                         store_variable);
+        return store_value(vm, instruction->next_pc,
+                           undo_result == ZM_UNDO_SUCCESS ? 1U : 0xffffU);
     }
 
     if (instruction->opcode_number == 10U) {
         *handled = 1;
         if (instruction->operand_count_actual != 0U)
             return dispatch_error(vm, "restore_undo does not accept operands");
+
+        undo_result = zmachine_undo_restore(vm);
+        if (undo_result == ZM_UNDO_SUCCESS)
+            return TCL_OK;
+        if (undo_result == ZM_UNDO_ERROR)
+            return TCL_ERROR;
         return store_value(vm, instruction->next_pc, 0U);
     }
 
@@ -405,7 +426,7 @@ int zmachine_step(ZMachine *vm)
                               "unable to decode Z-machine instruction");
     }
 
-    if (handle_extended_compatibility(vm, &instruction, &handled) != TCL_OK)
+    if (handle_extended_undo(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
     if (handled)
         return TCL_OK;
