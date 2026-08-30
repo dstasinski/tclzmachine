@@ -84,6 +84,25 @@ static int store_result(ZMachine *vm, uint32_t store_pc, uint16_t value)
     return TCL_OK;
 }
 
+/* Finish the pending opcode with success/failure at its original continuation. */
+static int complete_request(ZMachine *vm, uint32_t continuation, int success)
+{
+    int rc;
+
+    vm->state = ZM_STATE_READY;
+    vm->pending_file_pc = 0U;
+    vm->error[0] = '\0';
+
+    if (vm->version <= 3U)
+        rc = apply_branch(vm, continuation, success);
+    else
+        rc = store_result(vm, continuation, success ? 1U : 0U);
+
+    if (rc != TCL_OK)
+        vm->state = ZM_STATE_ERROR;
+    return rc;
+}
+
 /*
  * Recognize only full-game save/restore forms.
  *
@@ -158,27 +177,15 @@ int zmachine_step(ZMachine *vm)
 int zmachine_save_file(ZMachine *vm, const char *path)
 {
     uint32_t continuation;
-    int rc;
 
     if (!vm || vm->state != ZM_STATE_WAITING_SAVE)
         return file_error(vm, "Z-machine is not waiting for a save filename");
 
     continuation = vm->pending_file_pc;
     if (zmachine_quetzal_save(vm, path, continuation) != TCL_OK)
-        return TCL_ERROR; /* Leave WAITING_SAVE so Tcl may retry another path. */
+        return TCL_ERROR; /* Leave WAITING_SAVE so the host may retry or cancel. */
 
-    vm->state = ZM_STATE_READY;
-    vm->pending_file_pc = 0U;
-    vm->error[0] = '\0';
-
-    if (vm->version <= 3U)
-        rc = apply_branch(vm, continuation, 1);
-    else
-        rc = store_result(vm, continuation, 1U);
-
-    if (rc != TCL_OK)
-        vm->state = ZM_STATE_ERROR;
-    return rc;
+    return complete_request(vm, continuation, 1);
 }
 
 int zmachine_restore_file(ZMachine *vm, const char *path)
@@ -190,7 +197,7 @@ int zmachine_restore_file(ZMachine *vm, const char *path)
         return file_error(vm, "Z-machine is not waiting for a restore filename");
 
     if (zmachine_quetzal_restore(vm, path, &saved_pc) != TCL_OK)
-        return TCL_ERROR; /* Current restore request remains retryable. */
+        return TCL_ERROR; /* Current request remains retryable or cancellable. */
 
     vm->pending_file_pc = 0U;
     vm->error[0] = '\0';
@@ -204,4 +211,16 @@ int zmachine_restore_file(ZMachine *vm, const char *path)
     if (rc != TCL_OK)
         vm->state = ZM_STATE_ERROR;
     return rc;
+}
+
+int zmachine_cancel_file(ZMachine *vm)
+{
+    uint32_t continuation;
+
+    if (!vm || (vm->state != ZM_STATE_WAITING_SAVE &&
+                vm->state != ZM_STATE_WAITING_RESTORE))
+        return file_error(vm, "Z-machine is not waiting for a save/restore filename");
+
+    continuation = vm->pending_file_pc;
+    return complete_request(vm, continuation, 0);
 }
