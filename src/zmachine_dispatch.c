@@ -143,6 +143,10 @@ static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
  * NUMBER. Dereferencing it before executing the opcode causes a second access
  * inside the opcode and can double-pop stack variable 0. Preserve the raw
  * variable number here and resolve only the remaining ordinary operands.
+ *
+ * EXT opcodes use the same internal operand-count bucket as VAR opcodes. Any
+ * VAR-table match in this compatibility layer must therefore also require the
+ * VARIABLE physical form, otherwise EXT:n can be mistaken for VAR:n.
  */
 static int handle_indirect_variable_opcode(ZMachine *vm,
                                            const ZMachineInstruction *instruction,
@@ -211,7 +215,8 @@ static int handle_indirect_variable_opcode(ZMachine *vm,
                                 : (int16_t)value < (int16_t)second);
     }
 
-    if (instruction->operand_count == ZM_OPERANDS_VAR &&
+    if (instruction->form == ZM_FORM_VARIABLE &&
+        instruction->operand_count == ZM_OPERANDS_VAR &&
         instruction->opcode_number == 9U && vm->version <= 5U) {
         *handled = 1;
         if (indirect_variable_number(vm, instruction, &variable) != TCL_OK)
@@ -278,6 +283,7 @@ static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
 {
     if (!vm || !instruction || vm->version < 3U ||
+        instruction->form != ZM_FORM_VARIABLE ||
         instruction->operand_count != ZM_OPERANDS_VAR)
         return 0;
 
@@ -304,6 +310,7 @@ static int handle_output_stream(ZMachine *vm,
 
     *handled = 0;
     if (!vm || !instruction || vm->version < 3U ||
+        instruction->form != ZM_FORM_VARIABLE ||
         instruction->operand_count != ZM_OPERANDS_VAR ||
         instruction->opcode_number != 19U)
         return TCL_OK;
@@ -364,10 +371,10 @@ static int handle_output_stream(ZMachine *vm,
 /*
  * Handle VAR:30 print_table as plain textual rows.
  *
- * Screen tables in classic games can contain low terminal/control bytes that
- * are not legal printable ZSCII. They describe presentation rather than story
- * text. Within print_table only, discard control values 1..31 except carriage
- * return (13); ordinary print_char and packed Z-text remain standards-strict.
+ * Classic screen tables may contain bytes which are not printable ZSCII at
+ * all: low control values and the undefined 127..154 range. Those bytes carry
+ * terminal/layout information rather than story text. Within print_table only,
+ * discard them; ordinary print_char and packed Z-text remain standards-strict.
  */
 static int handle_print_table(ZMachine *vm,
                               const ZMachineInstruction *instruction,
@@ -380,6 +387,7 @@ static int handle_print_table(ZMachine *vm,
 
     *handled = 0;
     if (!vm || !instruction || vm->version < 5U ||
+        instruction->form != ZM_FORM_VARIABLE ||
         instruction->operand_count != ZM_OPERANDS_VAR ||
         instruction->opcode_number != 30U)
         return TCL_OK;
@@ -402,7 +410,8 @@ static int handle_print_table(ZMachine *vm,
             if ((size_t)address >= vm->memory_size)
                 return dispatch_error(vm, "print_table reads outside story memory");
             ch = vm->memory[address++];
-            if (ch >= 1U && ch <= 31U && ch != 13U)
+            if ((ch >= 1U && ch <= 31U && ch != 13U) ||
+                (ch >= 127U && ch <= 154U))
                 continue;
             if (zmachine_text_output_zscii(vm, ch) != TCL_OK)
                 return TCL_ERROR;
@@ -430,6 +439,7 @@ static int handle_read_char(ZMachine *vm,
 
     *handled = 0;
     if (!vm || !instruction || vm->version < 4U ||
+        instruction->form != ZM_FORM_VARIABLE ||
         instruction->operand_count != ZM_OPERANDS_VAR ||
         instruction->opcode_number != 22U)
         return TCL_OK;
@@ -520,7 +530,7 @@ int zmachine_step(ZMachine *vm)
     if (!is_text_only_noop(vm, &instruction))
         return zmachine_step_core(vm);
 
-    if (instruction.operand_count_actual < 1U)
+    if (instruction->operand_count_actual < 1U)
         return dispatch_error(vm, "presentation opcode is missing its operand");
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
