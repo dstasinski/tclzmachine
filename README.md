@@ -36,15 +36,17 @@ The runtime now contains a working execution core rather than only starter scaff
 - V7 routine and string offset support
 - per-session story memory, program counter, evaluation stack, call frames, random state, input, and output
 - instruction decoding for LONG, SHORT, VARIABLE, and V5+ EXTENDED forms
-- variable, local, global, stack, store, and branch semantics
+- variable, local, global, stack, store, branch, and indirect-variable semantics
 - routine calls and returns
 - arithmetic, logical, memory, control-flow, object, attribute, and property opcodes used by current compatibility tests
 - Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
-- cooperative `read` suspension/resumption
+- cooperative `read` and `read_char` suspension/resumption
 - dictionary lookup and parse-buffer tokenization
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
+- text-only presentation handling including nested output stream 3 memory capture
+- dynamically allocated one-level `save_undo` / `restore_undo` state restoration
 - optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, and wrapping behavior
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, presentation, and wrapping behavior
 - manual real-story compatibility probes
 
 ### Real-game compatibility reached so far
@@ -59,7 +61,9 @@ read leaflet
 inventory
 ```
 
-The official story file itself is **not** committed to this repository.
+The local compatibility catalog currently completes its startup/input smoke probe for all 33 tested story files, including the V5 cases which previously exposed presentation-table, indirect-variable, and extended-opcode dispatch issues. This is a smoke-test milestone rather than a claim of complete Z-machine conformance.
+
+Official story files themselves are **not** committed to this repository.
 
 ## Tcl API
 
@@ -203,7 +207,7 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 1. Continue opcode compatibility work using real story files as probes.
 2. Complete text-oriented handling for remaining safe presentation/status opcodes.
 3. Add complete extended ZSCII/Unicode translation support needed by later stories.
-4. Implement save/restore, with Quetzal-compatible persistence as the preferred target.
+4. Implement file-based save/restore, with Quetzal-compatible persistence as the preferred target; one-level in-memory undo is already implemented.
 5. Add the project-owned compiled Z3/Z5 integration game and scripted conversations.
 6. Broaden compatibility testing across representative V1-V5, V7, and V8 stories.
 7. Complete the source/header documentation audit.
