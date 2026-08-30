@@ -65,6 +65,41 @@ static int write_word(ZMachine *vm, uint32_t address, uint16_t value)
     return TCL_OK;
 }
 
+/*
+ * Return nonzero when operand zero is an indirect variable reference.
+ *
+ * Most variable operands are dereferenced while operands are resolved. Seven
+ * Z-machine opcodes are different: their first operand names a variable and
+ * must remain a variable number until the opcode itself reads or writes it.
+ * Keeping that distinction in the core resolver prevents stack variable 0
+ * from being popped before inc/dec/inc_chk/dec_chk/load/store/pull execute.
+ */
+static int operand_is_indirect_variable_reference(
+    const ZMachine *vm,
+    const ZMachineInstruction *instruction,
+    uint8_t operand_index)
+{
+    if (!vm || !instruction || operand_index != 0U)
+        return 0;
+
+    if (instruction->operand_count == ZM_OPERANDS_1OP &&
+        (instruction->opcode_number == 5U ||
+         instruction->opcode_number == 6U ||
+         instruction->opcode_number == 14U))
+        return 1;
+
+    if (instruction->operand_count == ZM_OPERANDS_2OP &&
+        (instruction->opcode_number == 4U ||
+         instruction->opcode_number == 5U ||
+         instruction->opcode_number == 13U))
+        return 1;
+
+    return vm->version <= 5U &&
+           instruction->form == ZM_FORM_VARIABLE &&
+           instruction->operand_count == ZM_OPERANDS_VAR &&
+           instruction->opcode_number == 9U;
+}
+
 int zmachine_resolve_operands(ZMachine *vm,
                               const ZMachineInstruction *instruction,
                               uint16_t *values,
@@ -79,6 +114,22 @@ int zmachine_resolve_operands(ZMachine *vm,
     }
     for (i = 0U; i < instruction->operand_count_actual; ++i) {
         const ZMachineDecodedOperand *operand = &instruction->operands[i];
+
+        if (operand_is_indirect_variable_reference(vm, instruction, i)) {
+            if (operand->type == ZM_OPERAND_OMITTED) {
+                exec_error(vm,
+                           "indirect-variable opcode is missing its variable operand");
+                return TCL_ERROR;
+            }
+            if (operand->value > 0xffU) {
+                exec_error(vm,
+                           "indirect-variable operand exceeds variable-number range");
+                return TCL_ERROR;
+            }
+            values[i] = operand->value;
+            continue;
+        }
+
         if (operand->type == ZM_OPERAND_LARGE_CONSTANT ||
             operand->type == ZM_OPERAND_SMALL_CONSTANT) {
             values[i] = operand->value;
