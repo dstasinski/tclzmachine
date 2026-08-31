@@ -133,9 +133,10 @@ int zmachine_reset(ZMachine *vm);
 int zmachine_supply_input(ZMachine *vm, const char *line);
 int zmachine_run(ZMachine *vm);
 
-/* Complete a cooperative story save/restore request using a host path. */
+/* Complete, retry, or decline a cooperative story save/restore request. */
 int zmachine_save_file(ZMachine *vm, const char *path);
 int zmachine_restore_file(ZMachine *vm, const char *path);
+int zmachine_cancel_file(ZMachine *vm);
 
 /* Version-aware packed-address conversion helpers. */
 uint32_t zmachine_unpack_routine_address(const ZMachine *vm, uint16_t packed);
