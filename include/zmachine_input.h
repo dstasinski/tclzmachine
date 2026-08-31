@@ -8,7 +8,8 @@
  * this module writes that line into the story's text buffer using the layout
  * required by the active Z-machine version and, when requested by the story,
  * tokenizes it into the parse buffer using either the story dictionary or a
- * caller-supplied dictionary.
+ * caller-supplied dictionary. Version 5 lexical opcodes also reuse the same
+ * dictionary encoder directly.
  */
 
 #ifndef ZMACHINE_INPUT_H
@@ -58,6 +59,19 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
                                    uint16_t parse_buffer,
                                    uint16_t dictionary,
                                    int preserve_unrecognized);
+
+/*
+ * Perform Version 5+ `encode_text` dictionary encoding.
+ *
+ * length bytes beginning at zscii_text + from are encoded into the six-byte
+ * V4+ dictionary-key representation and written to coded_text in dynamic
+ * memory. The explicit length is honored; the source need not be NUL-ended.
+ */
+int zmachine_input_encode_text(ZMachine *vm,
+                               uint16_t zscii_text,
+                               uint16_t length,
+                               uint16_t from,
+                               uint16_t coded_text);
 
 #ifdef __cplusplus
 }
