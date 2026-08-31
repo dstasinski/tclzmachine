@@ -21,6 +21,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_quetzal.c
     src/zmachine_state.c
     src/zmachine_text.c
+    src/zmachine_tokenise.c
     src/zmachine_undo.c
     src/zmachine_version.c
     src/zmachine_wrap.c
@@ -29,6 +30,7 @@ set(TCLZMACHINE_VM_SOURCES
 #
 # Instruction execution is layered so each module owns one concern:
 #   zmachine_file.c       public zmachine_step(), cooperative file requests
+#   zmachine_tokenise.c   non-blocking lexical analysis opcode
 #   zmachine_dispatch.c   presentation/text-only compatibility wrapper
 #   zmachine_exec.c       ordinary core opcode executor
 # Rename the two lower implementations at compile time rather than duplicating
@@ -139,6 +141,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(get-child-stack-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(get-child-stack-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME get-child-stack-operand COMMAND get-child-stack-test)
+
+    add_executable(tokenise-test tests/tokenise.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(tokenise-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(tokenise-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME tokenise-opcode COMMAND tokenise-test)
 
     add_test(NAME package-smoke
              COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl
