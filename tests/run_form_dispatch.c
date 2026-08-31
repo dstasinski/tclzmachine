@@ -5,6 +5,11 @@
  * EXTENDED instructions share the decoder's VAR operand-count bucket, so the
  * run loop must not mistake EXT opcodes for VAR-table read/random/scan_table/
  * check_arg_count operations merely because their low opcode numbers match.
+ *
+ * Version/arity rejection is also tested with variable 0 operands. Reading
+ * variable 0 pops the evaluation stack, so an opcode which is illegal for the
+ * active story version must be rejected before operand resolution rather than
+ * acquiring a speculative stack side effect on its way to an error.
  */
 
 #include "tclzmachine.h"
@@ -96,6 +101,83 @@ int main(void)
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
         assert(strstr(vm.error, "opcode") != NULL);
+        free_vm(&vm);
+    }
+
+    /*
+     * scan_table is V4+. A V3 encoding which names variable 0 must be rejected
+     * before operand resolution, leaving the evaluation-stack sentinel intact.
+     */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 3U);
+        assert(zmachine_stack_push(&vm, 0xCAFEU) == TCL_OK);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xF7U; /* VAR:23 scan_table */
+        vm.memory[0x21U] = 0x97U; /* variable, small, small, omitted */
+        vm.memory[0x22U] = 0x00U; /* variable 0: would pop if resolved */
+        vm.memory[0x23U] = 0x80U;
+        vm.memory[0x24U] = 0x01U;
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "scan_table") != NULL);
+        assert(strstr(vm.error, "Version 4") != NULL);
+        assert(vm.sp == 1U && vm.stack[0] == 0xCAFEU);
+        free_vm(&vm);
+    }
+
+    /* check_arg_count is V5+ and likewise must not pop variable 0 in V4. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 4U);
+        assert(zmachine_stack_push(&vm, 0xBEEFU) == TCL_OK);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xFFU; /* VAR:31 check_arg_count */
+        vm.memory[0x21U] = 0xBFU; /* variable, then omitted */
+        vm.memory[0x22U] = 0x00U; /* variable 0: would pop if resolved */
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "check_arg_count") != NULL);
+        assert(strstr(vm.error, "Version 5") != NULL);
+        assert(vm.sp == 1U && vm.stack[0] == 0xBEEFU);
+        free_vm(&vm);
+    }
+
+    /* verify is not available before V3; reject it rather than invent behavior. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 2U);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBDU; /* 0OP:13 verify */
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "verify") != NULL);
+        assert(strstr(vm.error, "Version 3") != NULL);
+        free_vm(&vm);
+    }
+
+    /*
+     * Malformed read has a known structural error before host interaction. Do
+     * not suspend and ask Tcl for input only to diagnose the missing buffers on
+     * the next cooperative turn.
+     */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 3U);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xE4U; /* VAR:4 sread */
+        vm.memory[0x21U] = 0xFFU; /* all operands omitted */
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "buffer operands") != NULL);
         free_vm(&vm);
     }
 
