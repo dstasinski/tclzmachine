@@ -1,17 +1,21 @@
-!% -v3
+!% -v5
 !% $SERIAL=260819
 
 ! tclzmachine-test.inf
 !
-! Purpose-built integration story for the tclzmachine interpreter.  The game
-! is intentionally small and deterministic so scripted conversations can test
+! Purpose-built integration story for the tclzmachine interpreter. The game is
+! intentionally small and deterministic so scripted conversations can test
 ! parser input, object movement, properties, routine calls, arithmetic/state,
 ! room movement, inventory, scoring, and ordinary text output without relying
 ! on copyrighted commercial story files.
 !
-! The compiled V3 story is generated from this exact source by GitHub Actions
-! and committed under tests/games/compiled/.  Keep the fixed SERIAL above so a
-! rebuild is byte-stable when the source and compiler toolchain are unchanged.
+! The current standard Inform 6 library requires Z-machine V5 or later. GitHub
+! Actions therefore builds this standard-library fixture as V5. A separate V3
+! fixture will use a V3-capable library/toolchain rather than falsely compiling
+! this source against a library whose own opcodes require V5.
+!
+! Keep the fixed SERIAL above so a rebuild is byte-stable when the source and
+! compiler/library toolchain are unchanged.
 
 Constant Story "tclzmachine Test Adventure";
 Constant Headline "^A deterministic Z-machine integration fixture.^";
