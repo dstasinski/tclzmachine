@@ -10,10 +10,10 @@
  * dictionary implementation without moving host input policy into the
  * ordinary executor.
  *
- * CMake places this layer between cooperative file dispatch and presentation
- * dispatch. It therefore decodes only far enough to recognize its two VAR-table
- * opcodes, resolves their operands exactly once, then either executes locally or
- * delegates the untouched instruction path downward.
+ * CMake places this layer above the numeric read_char input layer. It therefore
+ * decodes only far enough to recognize its two VAR-table opcodes, resolves their
+ * operands exactly once, then either executes locally or delegates the untouched
+ * instruction path downward through key-input/presentation/core dispatch.
  */
 
 #include "tclzmachine.h"
@@ -23,8 +23,8 @@
 
 #include <stdio.h>
 
-/* Presentation wrapper supplied by zmachine_dispatch.c after symbol rename. */
-extern int zmachine_step_present(ZMachine *vm);
+/* Numeric read_char layer supplied by zmachine_key.c. */
+extern int zmachine_step_input(ZMachine *vm);
 
 /* Put the VM in its terminal error state with a lexical-layer diagnostic. */
 static int lexical_error(ZMachine *vm, const char *message)
@@ -40,8 +40,8 @@ static int lexical_error(ZMachine *vm, const char *message)
  * Execute one instruction through the non-blocking lexical layer.
  *
  * Only V5+ VAR:27 (`tokenise`) and VAR:28 (`encode_text`) are consumed here.
- * Everything else delegates to the presentation/core chain without resolving
- * operands in this layer, avoiding observable double reads/pops of variable 0.
+ * Everything else delegates without resolving operands in this layer, avoiding
+ * observable double reads/pops of variable 0.
  *
  * tokenise operands are:
  *   text buffer, parse buffer, optional dictionary address, optional flag.
@@ -78,7 +78,7 @@ int zmachine_step_tokenise(ZMachine *vm)
         instruction.operand_count != ZM_OPERANDS_VAR ||
         (instruction.opcode_number != 27U &&
          instruction.opcode_number != 28U))
-        return zmachine_step_present(vm);
+        return zmachine_step_input(vm);
 
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
