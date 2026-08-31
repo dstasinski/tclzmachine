@@ -57,27 +57,32 @@ static void init_vm(ZMachine *vm)
     put_word(vm->memory, 0x1aU, vm->header_file_length_word);
     put_word(vm->memory, 0x1cU, vm->checksum);
 
-    /* Full-game V5 save/restore, both with no optional auxiliary operands. */
-    vm->memory[0x30U] = 0xbeU;
-    vm->memory[0x31U] = 0U;
-    vm->memory[0x32U] = 0xffU;
-    vm->memory[0x33U] = 0x10U;
+    /*
+     * Full-game V5 save/restore, both with no optional auxiliary operands.
+     * Synthetic executable code deliberately starts above the 64-byte header:
+     * interpreter-owned header bytes such as $32/$33 may legally be rewritten
+     * after restore and therefore must never double as instruction bytes here.
+     */
+    vm->memory[0x80U] = 0xbeU;
+    vm->memory[0x81U] = 0U;
+    vm->memory[0x82U] = 0xffU;
+    vm->memory[0x83U] = 0x10U;
 
-    vm->memory[0x40U] = 0xbeU;
-    vm->memory[0x41U] = 1U;
-    vm->memory[0x42U] = 0xffU;
-    vm->memory[0x43U] = 0x11U;
+    vm->memory[0xa0U] = 0xbeU;
+    vm->memory[0xa1U] = 1U;
+    vm->memory[0xa2U] = 0xffU;
+    vm->memory[0xa3U] = 0x11U;
 
     /* Additional requests used to verify explicit host cancellation. */
-    vm->memory[0x60U] = 0xbeU;
-    vm->memory[0x61U] = 0U;
-    vm->memory[0x62U] = 0xffU;
-    vm->memory[0x63U] = 0x13U;
+    vm->memory[0xc0U] = 0xbeU;
+    vm->memory[0xc1U] = 0U;
+    vm->memory[0xc2U] = 0xffU;
+    vm->memory[0xc3U] = 0x13U;
 
-    vm->memory[0x70U] = 0xbeU;
-    vm->memory[0x71U] = 1U;
-    vm->memory[0x72U] = 0xffU;
-    vm->memory[0x73U] = 0x14U;
+    vm->memory[0xd0U] = 0xbeU;
+    vm->memory[0xd1U] = 1U;
+    vm->memory[0xd2U] = 0xffU;
+    vm->memory[0xd3U] = 0x14U;
 
     vm->initial_dynamic_memory_size = vm->static_memory_addr;
     vm->initial_dynamic_memory =
@@ -176,14 +181,14 @@ int main(void)
         vm.random_state = 0x11111111U;
         vm.current_window = 1U;
 
-        vm.pc = 0x30U;
+        vm.pc = 0x80U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_WAITING_SAVE);
-        assert(vm.pending_file_pc == 0x33U);
+        assert(vm.pending_file_pc == 0x83U);
 
         assert(zmachine_save_file(&vm, save_path) == TCL_OK);
         assert(vm.state == ZM_STATE_READY);
-        assert(vm.pc == 0x34U);
+        assert(vm.pc == 0x84U);
         assert(get_word(vm.memory, 0x100U) == 1U);
 
         vm.memory[0x180U] = 0xbbU;
@@ -195,14 +200,14 @@ int main(void)
         vm.random_state = 0x22222222U;
         vm.current_window = 2U;
 
-        vm.pc = 0x40U;
+        vm.pc = 0xa0U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_WAITING_RESTORE);
-        assert(vm.pending_file_pc == 0x43U);
+        assert(vm.pending_file_pc == 0xa3U);
 
         assert(zmachine_restore_file(&vm, save_path) == TCL_OK);
         assert(vm.state == ZM_STATE_READY);
-        assert(vm.pc == 0x34U);
+        assert(vm.pc == 0x84U);
         assert(get_word(vm.memory, 0x100U) == 2U);
         assert(vm.memory[0x180U] == 0xaaU);
         assert(vm.sp == 2U);
@@ -214,24 +219,29 @@ int main(void)
         assert(vm.frames[0].locals[1] == 0xbbbbU);
         assert(vm.frames[0].argument_mask == 0x03U);
 
-        assert(get_word(vm.memory, 0x10U) == 0xa55aU);
-        assert(vm.flags2 == 0xa55aU);
+        /*
+         * Flags 2 is live interpreter/session state. Header refresh may clear
+         * unsupported request bits, but transcription/undo state must survive.
+         */
+        assert((get_word(vm.memory, 0x10U) & 0x0011U) ==
+               (0xa55aU & 0x0011U));
+        assert(vm.flags2 == get_word(vm.memory, 0x10U));
         assert(vm.random_state == 0x22222222U);
         assert(vm.current_window == 2U);
 
         /* Declining either host-file request completes the opcode with zero. */
-        vm.pc = 0x60U;
+        vm.pc = 0xc0U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_WAITING_SAVE);
         assert(zmachine_cancel_file(&vm) == TCL_OK);
-        assert(vm.state == ZM_STATE_READY && vm.pc == 0x64U);
+        assert(vm.state == ZM_STATE_READY && vm.pc == 0xc4U);
         assert(get_word(vm.memory, 0x106U) == 0U);
 
-        vm.pc = 0x70U;
+        vm.pc = 0xd0U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_WAITING_RESTORE);
         assert(zmachine_cancel_file(&vm) == TCL_OK);
-        assert(vm.state == ZM_STATE_READY && vm.pc == 0x74U);
+        assert(vm.state == ZM_STATE_READY && vm.pc == 0xd4U);
         assert(get_word(vm.memory, 0x108U) == 0U);
 
         free_vm(&vm);
