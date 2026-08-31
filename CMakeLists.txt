@@ -135,5 +135,15 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(presentation-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME presentation-opcodes COMMAND presentation-test)
 
-    add_test(NAME package-smoke COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl $<TARGET_FILE:tclzmachine>)
+    add_test(NAME package-smoke
+             COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl
+                     $<TARGET_FILE:tclzmachine>)
+
+    # Run the committed project-owned story as a true Tcl/API integration test.
+    # The binary is checked into the repository, so this test does not require
+    # an Inform compiler or library on ordinary developer machines.
+    add_test(NAME repository-story-integration
+             COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.tcl
+                     $<TARGET_FILE:tclzmachine>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/games/compiled/tclzmachine-test.z5)
 endif()
