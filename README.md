@@ -167,7 +167,7 @@ turn it on.[154]
 
 The first line is an ordinary Enter-terminated command. The second is a line terminated by ZSCII function key `154`. A line containing only `[129]` represents an exact `read_char` keypress. Output stream 4 writes a completed command in one operation after input finishes; exact `read_char` keys are written as their numeric marker.
 
-When transcript stream 2 is active, story output is copied to its UTF-8 host file and V1-V5 completed line input is echoed there. While output stream 3 is active, its standard exclusive-output behavior suppresses story text from the other selected output streams. The Tcl/IRC frontend does not echo a player's command back into the returned response because the chat transport already displays the user's message; that screen-side input echo remains frontend presentation policy.
+When transcript stream 2 is active, story output is copied to its UTF-8 host file and V1-V5 completed line input is echoed there. While output stream 3 is active, its standard exclusive-output behavior suppresses story text from the other selected output streams. Completed V1-V5 line input is also preserved in the canonical VM output returned through Tcl as required by the Z-machine input-echo rules. If an IRC or other embedding application wants to avoid displaying a command twice because the transport already showed the user's message, that suppression belongs to host presentation policy rather than the VM core.
 
 ### Save/restore handshake
 
