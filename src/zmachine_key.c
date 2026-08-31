@@ -95,7 +95,12 @@ static int extra_input_defined(const ZMachine *vm, uint16_t zscii)
     return index < count;
 }
 
-/* Return nonzero exactly for key codes this non-V6 runtime can deliver. */
+/*
+ * Return nonzero exactly for keyboard-style codes this text-only host can
+ * deliver. Mouse/menu codes 252..254 are deliberately excluded: the runtime
+ * advertises no mouse and has no coordinates/click state with which to make
+ * those events meaningful, even though the ZSCII table defines them as input.
+ */
 static int zscii_input_defined(const ZMachine *vm, uint16_t zscii)
 {
     if (zscii == 8U || zscii == 13U || zscii == 27U)
@@ -106,10 +111,6 @@ static int zscii_input_defined(const ZMachine *vm, uint16_t zscii)
         return 1;
     if (zscii >= 155U && zscii <= 251U)
         return extra_input_defined(vm, zscii);
-
-    /* Menu click 252 is Version-6-only; V6 is intentionally unsupported. */
-    if (vm && vm->version >= 5U && (zscii == 253U || zscii == 254U))
-        return 1;
     return 0;
 }
 
@@ -143,7 +144,7 @@ int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
     if (!current_is_read_char(vm, &instruction))
         return key_api_error(vm, "Z-machine session is waiting for line input, not read_char");
     if (!zscii_input_defined(vm, zscii))
-        return key_api_error(vm, "invalid or undefined ZSCII input key");
+        return key_api_error(vm, "invalid, undefined, or unavailable ZSCII input key");
 
     encoded[0] = '\0';
     encoded[1] = (char)(uint8_t)zscii;
