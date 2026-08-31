@@ -6,7 +6,8 @@
  * This file owns Tcl-visible session names, presentation options, and host file
  * policy. Each session contains one independent ZMachine instance. Ordinary VM
  * execution remains unaware of IRC formatting and filesystem naming; when a
- * story requests a full save/restore, the VM yields and Tcl supplies the path.
+ * story requests either a full-game or auxiliary save/restore, the VM yields
+ * and Tcl supplies the actual host path.
  */
 
 #include "tclzmachine.h"
@@ -378,6 +379,14 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+/*
+ * Return session state and cooperative file-request metadata as a Tcl dict.
+ *
+ * fileRequest remains the stable high-level save/restore indicator. When a
+ * request is pending, fileRequestKind distinguishes full Quetzal state from a
+ * V5+ auxiliary byte-region transfer. Auxiliary fields are always present so
+ * callers can use straightforward dict access without testing for key existence.
+ */
 static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                     int objc, Tcl_Obj *const objv[])
 {
@@ -386,6 +395,7 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
     Tcl_Obj *dict;
     const char *name;
     const char *file_request = "";
+    const char *file_request_kind = "";
 
     if (objc != 2) {
         Tcl_WrongNumArgs(interp, 1, objv, "session");
@@ -404,6 +414,11 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
         file_request = "save";
     else if (s->vm->state == ZM_STATE_WAITING_RESTORE)
         file_request = "restore";
+
+    if (s->vm->pending_file_kind == ZM_FILE_REQUEST_FULL)
+        file_request_kind = "full";
+    else if (s->vm->pending_file_kind == ZM_FILE_REQUEST_AUXILIARY)
+        file_request_kind = "auxiliary";
 
     dict = Tcl_NewDictObj();
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("version", -1),
@@ -426,6 +441,16 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewIntObj((int)s->vm->state));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
                    Tcl_NewStringObj(file_request, -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequestKind", -1),
+                   Tcl_NewStringObj(file_request_kind, -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("suggestedFileName", -1),
+                   Tcl_NewStringObj(s->vm->pending_file_name, -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("filePrompt", -1),
+                   Tcl_NewIntObj(s->vm->pending_file_prompt));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileTable", -1),
+                   Tcl_NewIntObj(s->vm->pending_file_table));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileBytes", -1),
+                   Tcl_NewIntObj(s->vm->pending_file_bytes));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("wordWrapBytes", -1),
                    Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
     Tcl_SetObjResult(interp, dict);
