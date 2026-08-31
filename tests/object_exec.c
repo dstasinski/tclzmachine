@@ -1,3 +1,14 @@
+/*
+ * object_exec.c
+ *
+ * Instruction-level regression coverage for V3 object/property opcodes.
+ * A hand-built V1-V3 object table is exercised through real encoded
+ * instructions and the public zmachine_step() path, verifying store/branch
+ * continuations as well as the underlying relationship/attribute/property
+ * mutations. Direct helper tests live in object.c; this file specifically locks
+ * down executor-to-object-subsystem integration.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
 
@@ -6,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocate the V3 VM layout shared by every encoded instruction below. */
 static void init_vm(ZMachine *vm)
 {
     memset(vm, 0, sizeof(*vm));
@@ -21,6 +33,7 @@ static void init_vm(ZMachine *vm)
     Tcl_DStringInit(&vm->pending_input);
 }
 
+/* Release storage owned by init_vm(). */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -28,12 +41,14 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
+/* Write one big-endian word into the synthetic story image. */
 static void put16(uint8_t *memory, size_t address, uint16_t value)
 {
     memory[address] = (uint8_t)(value >> 8);
     memory[address + 1U] = (uint8_t)value;
 }
 
+/* Read one global variable directly so opcode store results can be asserted. */
 static uint16_t get_global(const ZMachine *vm, uint8_t variable)
 {
     size_t address = (size_t)vm->globals_addr +
@@ -42,11 +57,13 @@ static uint16_t get_global(const ZMachine *vm, uint8_t variable)
                       vm->memory[address + 1U]);
 }
 
+/* Compute a V1-V3 9-byte object entry following the 31 default words. */
 static size_t entry(unsigned object)
 {
     return 0x80U + 62U + (object - 1U) * 9U;
 }
 
+/* Build one small tree and descending property table used by all opcode cases. */
 static void build_objects(ZMachine *vm)
 {
     size_t o1 = entry(1U);
