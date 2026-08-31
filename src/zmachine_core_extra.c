@@ -6,11 +6,11 @@
  * implemented in the original core executor.
  *
  * This module is deliberately below the text/presentation wrapper. It recognizes
- * only the small set it owns, validates the operand shapes expected by the older
- * executor, resolves owned operands exactly once, and delegates every other valid
- * instruction untouched to zmachine_exec.c. Keeping operand resolution local to
- * a handled instruction is essential because reading variable 0 pops the
- * evaluation stack.
+ * only the small set it owns, validates version legality and operand shapes before
+ * the older executor can evaluate operands, resolves owned operands exactly once,
+ * and delegates every other valid instruction untouched to zmachine_exec.c.
+ * Keeping legality checks ahead of operand resolution is essential because reading
+ * variable 0 pops the evaluation stack.
  *
  * catch/throw use the standard frame cookie: the number of routine frames
  * currently on the system stack. throw discards newer frames, then returns from
@@ -51,6 +51,109 @@ static int core_extra_error(ZMachine *vm, const char *message)
         snprintf(vm->error, sizeof(vm->error), "%s", message);
     }
     return TCL_ERROR;
+}
+
+/*
+ * Reject version-illegal opcodes before any delegated operand can be resolved.
+ *
+ * The original executor resolves every operand before entering its opcode switch.
+ * That is correct for a legal instruction, but it is observably wrong when an
+ * opcode does not exist in the current story version and an operand is variable
+ * 0: the illegal instruction can pop the evaluation stack before being rejected.
+ * This preflight therefore covers every version-gated ordinary opcode family that
+ * may otherwise delegate to the older executor or to a higher compatibility
+ * wrapper.
+ *
+ * Two exceptions are intentional. VAR:21 sound_effect is accepted from V3 for
+ * compatibility with historical Infocom story files even though its formal
+ * Standard entry is V5/3. EXT:29..255 retain the Standard's special ignore rule;
+ * EXT:29 is therefore not rejected in V5, and EXT:30+ are never rejected here.
+ */
+static int validate_opcode_version(ZMachine *vm,
+                                   const ZMachineInstruction *instruction)
+{
+    uint8_t opcode;
+
+    if (!vm || !instruction)
+        return core_extra_error(vm, "invalid opcode version validation request");
+
+    opcode = instruction->opcode_number;
+
+    if (instruction->form == ZM_FORM_EXTENDED) {
+        if (vm->version < 5U)
+            return core_extra_error(vm, "extended opcode is illegal before V5");
+
+        /* EXT:14 and EXT:15 are reserved and are not in the EXT:29+ ignore range. */
+        if (opcode == 14U || opcode == 15U)
+            return core_extra_error(vm, "reserved extended Z-machine opcode");
+
+        /* These opcode ranges first become defined in V6. */
+        if (vm->version < 6U &&
+            ((opcode >= 5U && opcode <= 8U) ||
+             (opcode >= 16U && opcode <= 28U)))
+            return core_extra_error(vm, "extended opcode requires V6 or later");
+
+        return TCL_OK;
+    }
+
+    if (instruction->operand_count == ZM_OPERANDS_2OP) {
+        if (opcode == 25U && vm->version < 4U)
+            return core_extra_error(vm, "call_2s is illegal before V4");
+        if (opcode >= 26U && opcode <= 28U && vm->version < 5U)
+            return core_extra_error(vm, "2OP opcode requires V5 or later");
+        return TCL_OK;
+    }
+
+    if (instruction->operand_count == ZM_OPERANDS_1OP) {
+        if (opcode == 8U && vm->version < 4U)
+            return core_extra_error(vm, "call_1s is illegal before V4");
+        return TCL_OK;
+    }
+
+    if (instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return TCL_OK;
+
+    switch (opcode) {
+    case 10U: /* split_window */
+    case 11U: /* set_window */
+    case 19U: /* output_stream */
+    case 20U: /* input_stream */
+    case 21U: /* sound_effect: historical V3 compatibility */
+        if (vm->version < 3U)
+            return core_extra_error(vm, "VAR opcode requires V3 or later");
+        break;
+
+    case 12U: /* call_vs2 */
+    case 13U: /* erase_window */
+    case 14U: /* erase_line */
+    case 15U: /* set_cursor */
+    case 16U: /* get_cursor */
+    case 17U: /* set_text_style */
+    case 18U: /* buffer_mode */
+    case 22U: /* read_char */
+    case 23U: /* scan_table */
+        if (vm->version < 4U)
+            return core_extra_error(vm, "VAR opcode requires V4 or later");
+        break;
+
+    case 24U: /* not */
+    case 25U: /* call_vn */
+    case 26U: /* call_vn2 */
+    case 27U: /* tokenise */
+    case 28U: /* encode_text */
+    case 29U: /* copy_table */
+    case 30U: /* print_table */
+    case 31U: /* check_arg_count */
+        if (vm->version < 5U)
+            return core_extra_error(vm, "VAR opcode requires V5 or later");
+        break;
+
+    default:
+        break;
+    }
+
+    return TCL_OK;
 }
 
 /* Store one opcode result and continue after its store-variable byte. */
@@ -268,12 +371,12 @@ static uint16_t arithmetic_shift(uint16_t number, int16_t places)
 /*
  * Execute one instruction through the pure-core completeness layer.
  *
- * Every decoded instruction first receives the narrow arity validation required
- * to protect the older delegated executor. Unrecognized valid instructions then
- * delegate before operand resolution. Owned operations are evaluated according
- * to their exact opcode contracts. The Standard leaves shifts outside -15..+15
- * undefined; this runtime rejects them deterministically rather than invoking
- * undefined C shifts or silently inventing semantics.
+ * Every decoded instruction first receives version-legality and narrow arity
+ * validation before any delegated executor can resolve its operands. Unrecognized
+ * valid instructions then delegate untouched. Owned operations are evaluated
+ * according to their exact opcode contracts. The Standard leaves shifts outside
+ * -15..+15 undefined; this runtime rejects them deterministically rather than
+ * invoking undefined C shifts or silently inventing semantics.
  */
 int zmachine_step_core(ZMachine *vm)
 {
@@ -290,6 +393,9 @@ int zmachine_step_core(ZMachine *vm)
         return core_extra_error(vm, decode_error[0] ? decode_error :
                                 "unable to decode Z-machine instruction");
     }
+
+    if (validate_opcode_version(vm, &instruction) != TCL_OK)
+        return TCL_ERROR;
 
     if (validate_delegated_arity(vm, &instruction) != TCL_OK)
         return TCL_ERROR;
