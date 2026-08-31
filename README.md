@@ -42,7 +42,8 @@ The runtime now contains a working execution core rather than only starter scaff
 - Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
 - standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
 - cooperative `read` and `read_char` suspension/resumption, including V5+ preloaded line-input buffers
-- dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`
+- printable-ASCII host line validation plus exact numeric ZSCII `read_char` input for arrows, function keys, keypad keys, and defined extra characters
+- dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`, including custom alphabet tables and standard lowercase dictionary encryption
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
 - text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
@@ -81,12 +82,26 @@ package require tclzmachine
 zmachine::create game1 /path/to/zork1.z3
 ```
 
-Send one player command. The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore filename, halts, or encounters an error:
+Send one player command. `zmachine::command` is the line-oriented API used for `read`/`sread`/`aread` input. The current host keyboard contract accepts printable ASCII ZSCII (space through `~`) and rejects control bytes or non-ASCII Tcl UTF-8 input rather than misinterpreting multibyte UTF-8 as multiple ZSCII characters:
 
 ```tcl
 set response [zmachine::command game1 "look"]
 puts $response
 ```
+
+The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore filename, halts, or encounters an error.
+
+When a story is suspended on `read_char`, use `zmachine::key` to supply one exact numeric ZSCII input code instead of trying to encode a special key into a Tcl string:
+
+```tcl
+# ZSCII 129 = cursor up
+set response [zmachine::key game1 129]
+puts $response
+```
+
+`zmachine::key` accepts ordinary keyboard-input ZSCII such as Enter (`13`), Escape (`27`), printable ASCII (`32`-`126`), cursor/function/keypad codes (`129`-`154`), and extra-character codes that are defined by the story's active Unicode translation table. Undefined/reserved codes are rejected without consuming the pending `read_char`, so the host may retry. Mouse/menu event codes `252`-`254` are intentionally unavailable because this text-only runtime exposes no mouse or click-position state.
+
+The older convenience behavior remains: if a normal `zmachine::command` reaches `read_char` while its command string is already queued, the first printable ASCII character can satisfy that request. `zmachine::key` is the unambiguous API for non-ASCII ZSCII keyboard events.
 
 Inspect session metadata:
 
@@ -162,7 +177,7 @@ zmachine::destroy game1
 
 ## IRC-oriented output wrapping
 
-Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command` and file-request completion calls apply the configured session limit only while returning that text to Tcl.
+Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, and file-request completion calls apply the configured session limit only while returning that text to Tcl.
 
 The wrapper:
 
@@ -289,7 +304,7 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 A game session remains resident as one native VM instance:
 
 ```text
-IRC/Tcl -> one input line -> VM executes -> next input/file request -> Tcl
+IRC/Tcl -> one input line/key -> VM executes -> next input/file request -> Tcl
 ```
 
 IRC framing, flood control, user ownership, authentication, save-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
