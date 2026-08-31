@@ -4,13 +4,13 @@
  * Line-input storage and dictionary tokenization for the cooperative,
  * text-only Z-machine runtime.
  *
- * Tcl supplies an entire command line at once. This module converts that line
- * into the exact text-buffer representation expected by the active Z-machine
- * version, lowercases it for dictionary matching, and optionally fills the
- * story's parse buffer. The same lexical engine is also exposed to the V5+
- * `tokenise` and `encode_text` opcodes so read-time parsing and explicit
- * dictionary encoding cannot drift. It intentionally contains no terminal,
- * filesystem, or IRC behavior.
+ * Tcl supplies an entire command line at once. The `read` path converts that
+ * line into the exact text-buffer representation expected by the active
+ * Z-machine version, including the Standard-mandated lower-case folding before
+ * storage and lexical analysis. The same lexical engine is also exposed to the
+ * V5+ `tokenise` and `encode_text` opcodes, but those operations act on ZSCII
+ * already present in story memory and therefore preserve its case exactly.
+ * It intentionally contains no terminal, filesystem, or IRC behavior.
  *
  * Story buffers are validated before mutation. This matters for malformed
  * stories: a text buffer crossing static memory or a truncated parse buffer must
@@ -113,11 +113,11 @@ static int custom_alphabet_address(const ZMachine *vm, uint16_t *address)
 }
 
 /*
- * Find one lower-case ZSCII byte in the version's default alphabet table.
+ * Find one ZSCII byte in the version's default alphabet table.
  *
- * A0 contains lower-case letters. A1 is not normally needed because dictionary
- * input is lowercased. A2 differs in V1: with no newline entry, digit zero begins
- * at Z-character 7; in V2+ digit zero begins at Z-character 8 because A2/7 is
+ * Lower-case letters occupy A0 and upper-case letters occupy the same positions
+ * in A1. A2 differs in V1: with no newline entry, digit zero begins at
+ * Z-character 7; in V2+ digit zero begins at Z-character 8 because A2/7 is
  * newline. A2/6 is always the 10-bit ZSCII escape and is never a table glyph.
  */
 static int default_alphabet_index(uint8_t version,
@@ -129,6 +129,10 @@ static int default_alphabet_index(uint8_t version,
     if (c >= 'a' && c <= 'z') {
         *zchar = (uint8_t)(6U + (c - 'a'));
         return 0;
+    }
+    if (c >= 'A' && c <= 'Z') {
+        *zchar = (uint8_t)(6U + (c - 'A'));
+        return 1;
     }
 
     if (version == 1U) {
@@ -210,9 +214,12 @@ static uint8_t v12_shift_code(int current, int target, int lock)
  * Encode bytes into the fixed-width dictionary key format.
  *
  * V1-V3 dictionaries compare six Z-characters (four bytes); V4+ compare nine
- * Z-characters (six bytes). Typed text is lowercased, abbreviations are never
- * used, padding is Z-character 5, and an incomplete shift/escape construction
- * is retained if the fixed dictionary resolution cuts it off.
+ * Z-characters (six bytes). The bytes supplied here are encoded exactly as
+ * given: `read` performs its required lower-case conversion before calling the
+ * tokenizer, while `tokenise` and `encode_text` must preserve story-memory case.
+ * Abbreviations are never used, padding is Z-character 5, and an incomplete
+ * shift/escape construction is retained if the fixed dictionary resolution
+ * cuts it off.
  *
  * V5+ custom alphabet tables are honored for dictionary encryption just as they
  * are for text decoding. In V1/V2 the persistent alphabet state is tracked so
@@ -244,7 +251,7 @@ static int encode_dictionary_word(const ZMachine *vm,
     memset(zchars, 5, sizeof(zchars));
 
     for (i = 0U; i < word_len && zi < zmax; ++i) {
-        unsigned char c = (unsigned char)tolower((unsigned char)word[i]);
+        unsigned char c = word[i];
         uint8_t zchar = 0U;
         int alphabet;
         uint8_t sequence[4];
@@ -264,8 +271,7 @@ static int encode_dictionary_word(const ZMachine *vm,
                 int lock = 0;
 
                 if (i + 1U < word_len) {
-                    unsigned char next =
-                        (unsigned char)tolower((unsigned char)word[i + 1U]);
+                    unsigned char next = word[i + 1U];
                     uint8_t next_zchar;
                     int next_alphabet = next == (unsigned char)' ' ? -1 :
                         alphabet_index(vm, custom_table, next, &next_zchar);
@@ -391,6 +397,12 @@ static int dictionary_lookup(const ZMachine *vm,
     return TCL_OK;
 }
 
+/* Fold a host-entered read byte to lower case; story-memory lexical bytes do not. */
+static unsigned char lexical_byte(unsigned char c, int fold_lowercase)
+{
+    return fold_lowercase ? (unsigned char)tolower(c) : c;
+}
+
 /* Return nonzero when c is one of the selected dictionary's separators. */
 static int is_separator(const ZMachine *vm,
                         uint16_t dictionary_addr,
@@ -425,7 +437,8 @@ static size_t count_parse_tokens(const ZMachine *vm,
                                  uint16_t dictionary_addr,
                                  const char *line,
                                  size_t len,
-                                 uint8_t max_words)
+                                 uint8_t max_words,
+                                 int fold_lowercase)
 {
     size_t i = 0U;
     size_t count = 0U;
@@ -436,12 +449,14 @@ static size_t count_parse_tokens(const ZMachine *vm,
         if (i >= len)
             break;
 
-        if (is_separator(vm, dictionary_addr, (unsigned char)line[i])) {
+        if (is_separator(vm, dictionary_addr,
+                         lexical_byte((unsigned char)line[i], fold_lowercase))) {
             ++i;
         } else {
             while (i < len && line[i] != ' ' &&
                    !is_separator(vm, dictionary_addr,
-                                 (unsigned char)line[i]))
+                                 lexical_byte((unsigned char)line[i],
+                                              fold_lowercase)))
                 ++i;
         }
         ++count;
@@ -455,7 +470,8 @@ static int validate_parse_buffer(const ZMachine *vm,
                                  uint16_t parse_buffer,
                                  const char *line,
                                  size_t len,
-                                 uint16_t dictionary_addr)
+                                 uint16_t dictionary_addr,
+                                 int fold_lowercase)
 {
     uint8_t max_words;
     size_t token_count;
@@ -471,7 +487,8 @@ static int validate_parse_buffer(const ZMachine *vm,
         return TCL_ERROR;
 
     token_count = count_parse_tokens(vm, dictionary_addr,
-                                     line, len, max_words);
+                                     line, len, max_words,
+                                     fold_lowercase);
     required = 2U + token_count * 4U;
     if (required < 6U)
         required = 6U;
@@ -489,6 +506,10 @@ static int validate_parse_buffer(const ZMachine *vm,
  * text buffer. text_offset is 1 in V1-V4 and 2 in V5+ because the physical
  * text-buffer layouts differ between those version families.
  *
+ * `fold_lowercase` is true only for host input consumed by `read`, whose opcode
+ * contract requires case folding. `tokenise` passes false so arbitrary ZSCII
+ * already placed in a story text buffer is encrypted without alteration.
+ *
  * When preserve_unrecognized is true, an unknown word leaves all four bytes of
  * its existing parse slot untouched while still incrementing the token count.
  */
@@ -498,7 +519,8 @@ static int tokenize(ZMachine *vm,
                     size_t len,
                     uint8_t text_offset,
                     uint16_t dictionary_addr,
-                    int preserve_unrecognized)
+                    int preserve_unrecognized,
+                    int fold_lowercase)
 {
     uint8_t max_words, count = 0U;
     size_t i = 0U;
@@ -507,7 +529,7 @@ static int tokenize(ZMachine *vm,
         return TCL_OK;
 
     if (validate_parse_buffer(vm, parse_buffer, line, len,
-                              dictionary_addr) != TCL_OK)
+                              dictionary_addr, fold_lowercase) != TCL_OK)
         return TCL_ERROR;
 
     max_words = vm->memory[parse_buffer];
@@ -526,15 +548,20 @@ static int tokenize(ZMachine *vm,
             break;
 
         start = i;
-        if (is_separator(vm, dictionary_addr, (unsigned char)line[i])) {
-            token[key_len++] = line[i++];
+        if (is_separator(vm, dictionary_addr,
+                         lexical_byte((unsigned char)line[i], fold_lowercase))) {
+            token[key_len++] = (char)lexical_byte((unsigned char)line[i],
+                                                  fold_lowercase);
+            ++i;
         } else {
             while (i < len && line[i] != ' ' &&
                    !is_separator(vm, dictionary_addr,
-                                 (unsigned char)line[i])) {
+                                 lexical_byte((unsigned char)line[i],
+                                              fold_lowercase))) {
                 if (key_len + 1U < sizeof(token))
                     token[key_len++] =
-                        (char)tolower((unsigned char)line[i]);
+                        (char)lexical_byte((unsigned char)line[i],
+                                           fold_lowercase);
                 ++i;
             }
         }
@@ -591,7 +618,7 @@ int zmachine_input_read_line(ZMachine *vm,
         return TCL_ERROR;
     if (custom_alphabet_address(vm, &custom_table) != TCL_OK)
         return TCL_ERROR;
-    (void)custom_table; /* Validation only; lookup repeats it while encoding. */
+    (void)custom_table;
 
     line = Tcl_DStringValue(&vm->pending_input);
     len = (size_t)Tcl_DStringLength(&vm->pending_input);
@@ -620,13 +647,12 @@ int zmachine_input_read_line(ZMachine *vm,
         return TCL_ERROR;
 
     if (validate_parse_buffer(vm, parse_buffer, line, len,
-                              vm->dictionary_addr) != TCL_OK)
+                              vm->dictionary_addr, 1) != TCL_OK)
         return TCL_ERROR;
 
-    /* Dictionary input is case-insensitive; store a lower-case copy. */
+    /* `read` stores and parses a lower-case copy of the host-entered command. */
     for (i = 0U; i < len; ++i) {
-        unsigned char c =
-            (unsigned char)tolower((unsigned char)line[i]);
+        unsigned char c = lexical_byte((unsigned char)line[i], 1);
         if (write_byte(vm, (uint32_t)text_buffer + offset + (uint32_t)i,
                        c) != TCL_OK)
             return TCL_ERROR;
@@ -644,7 +670,7 @@ int zmachine_input_read_line(ZMachine *vm,
     }
 
     if (tokenize(vm, parse_buffer, line, len, offset,
-                 vm->dictionary_addr, 0) != TCL_OK)
+                 vm->dictionary_addr, 0, 1) != TCL_OK)
         return TCL_ERROR;
 
     Tcl_DStringSetLength(&vm->pending_input, 0);
@@ -656,7 +682,7 @@ int zmachine_input_read_line(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Tokenize text already stored in a Version 5+ text buffer. */
+/* Tokenize text already stored in a Version 5+ text buffer without case folding. */
 int zmachine_input_tokenize_buffer(ZMachine *vm,
                                    uint16_t text_buffer,
                                    uint16_t parse_buffer,
@@ -685,10 +711,10 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
     return tokenize(vm, parse_buffer,
                     (const char *)(vm->memory + text_start),
                     len, 2U, dictionary_addr,
-                    preserve_unrecognized != 0);
+                    preserve_unrecognized != 0, 0);
 }
 
-/* Encode an explicit V5+ ZSCII memory slice into a six-byte dictionary key. */
+/* Encode an explicit V5+ ZSCII memory slice exactly as supplied. */
 int zmachine_input_encode_text(ZMachine *vm,
                                uint16_t zscii_text,
                                uint16_t length,
