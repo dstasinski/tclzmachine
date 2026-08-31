@@ -26,11 +26,10 @@ proc require_contains {label text needle} {
 # adds zmachine::info when a real-story regression fails to make the exact PC
 # and run state visible in CTest/GitHub Actions output.
 proc run_command {session command} {
-    if {[catch {zmachine::command $session $command} result options]} {
+    if {[catch {zmachine::command $session $command} result]} {
         set info "unavailable"
         catch {set info [zmachine::info $session]}
-        return -options $options \
-            "command [list $command] failed: $result\nSession information: $info"
+        error "command [list $command] failed: $result\nSession information: $info"
     }
     return $result
 }
