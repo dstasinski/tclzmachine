@@ -16,6 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define REPLAY_PATH "tclzmachine-stream-replay.tmp"
+#define TRANSCRIPT_PATH "tclzmachine-stream-transcript.tmp"
+#define RECORD_PATH "tclzmachine-stream-record.tmp"
+
 static void init_vm(ZMachine *vm)
 {
     memset(vm, 0, sizeof(*vm));
@@ -64,11 +68,6 @@ static void read_file(const char *path, char *buffer, size_t capacity)
     fclose(fp);
 }
 
-static void make_path(char path[L_tmpnam])
-{
-    assert(tmpnam(path) != NULL);
-}
-
 static void assert_run_ok(ZMachine *vm, const char *context)
 {
     int rc = zmachine_run(vm);
@@ -83,15 +82,17 @@ static void assert_run_ok(ZMachine *vm, const char *context)
 
 int main(void)
 {
+    remove(REPLAY_PATH);
+    remove(TRANSCRIPT_PATH);
+    remove(RECORD_PATH);
+
     /* input_stream 1 requests a replay path, then automatically supplies LOOK. */
     {
         ZMachine vm;
-        char path[L_tmpnam];
         FILE *fp;
 
         init_vm(&vm);
-        make_path(path);
-        fp = fopen(path, "wb");
+        fp = fopen(REPLAY_PATH, "wb");
         assert(fp != NULL);
         assert(fputs("LOOK\n", fp) >= 0);
         fclose(fp);
@@ -108,7 +109,7 @@ int main(void)
         assert(strcmp(zmachine_pending_stream_request(&vm), "replay") == 0);
         assert(vm.pc == 0x20U);
 
-        assert(zmachine_stream_file(&vm, "replay", path) == TCL_OK);
+        assert(zmachine_stream_file(&vm, "replay", REPLAY_PATH) == TCL_OK);
         assert(vm.pc == 0x23U);
         assert(zmachine_current_input_stream(&vm) == 1);
         assert_run_ok(&vm, "replay execution");
@@ -118,17 +119,15 @@ int main(void)
         assert(vm.memory[0x40U] == 0U && vm.memory[0x41U] == 13U);
 
         free_vm(&vm);
-        remove(path);
+        remove(REPLAY_PATH);
     }
 
     /* Stream 2 receives story output plus completed V1-V5 line input echo. */
     {
         ZMachine vm;
-        char path[L_tmpnam];
         char contents[128];
 
         init_vm(&vm);
-        make_path(path);
 
         vm.memory[0x20U] = 0xF3U; /* VAR:19 output_stream */
         vm.memory[0x21U] = 0x7FU;
@@ -143,7 +142,7 @@ int main(void)
         assert_run_ok(&vm, "transcript selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
         assert(strcmp(zmachine_pending_stream_request(&vm), "transcript") == 0);
-        assert(zmachine_stream_file(&vm, "transcript", path) == TCL_OK);
+        assert(zmachine_stream_file(&vm, "transcript", TRANSCRIPT_PATH) == TCL_OK);
         assert_run_ok(&vm, "transcript input wait");
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(strcmp(zmachine_output_data(&vm), "A") == 0);
@@ -151,21 +150,19 @@ int main(void)
         assert(zmachine_supply_input(&vm, "LOOK") == TCL_OK);
         assert_run_ok(&vm, "transcript completion");
         assert(vm.state == ZM_STATE_HALTED);
-        read_file(path, contents, sizeof(contents));
+        read_file(TRANSCRIPT_PATH, contents, sizeof(contents));
         assert(strcmp(contents, "Alook\n") == 0);
 
         free_vm(&vm);
-        remove(path);
+        remove(TRANSCRIPT_PATH);
     }
 
     /* Stream 4 writes completed commands and exact read_char records. */
     {
         ZMachine vm;
-        char path[L_tmpnam];
         char contents[128];
 
         init_vm(&vm);
-        make_path(path);
 
         vm.memory[0x20U] = 0xF3U; /* output_stream 4 */
         vm.memory[0x21U] = 0x7FU;
@@ -185,7 +182,7 @@ int main(void)
         assert_run_ok(&vm, "record selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
         assert(strcmp(zmachine_pending_stream_request(&vm), "record") == 0);
-        assert(zmachine_stream_file(&vm, "record", path) == TCL_OK);
+        assert(zmachine_stream_file(&vm, "record", RECORD_PATH) == TCL_OK);
         assert_run_ok(&vm, "record line wait");
         assert(vm.state == ZM_STATE_WAITING_INPUT);
 
@@ -196,10 +193,10 @@ int main(void)
         assert_run_ok(&vm, "record completion");
         assert(vm.state == ZM_STATE_HALTED);
 
-        read_file(path, contents, sizeof(contents));
+        read_file(RECORD_PATH, contents, sizeof(contents));
         assert(strcmp(contents, "look\n[129]\n") == 0);
         free_vm(&vm);
-        remove(path);
+        remove(RECORD_PATH);
     }
 
     puts("external stream I/O tests passed");
