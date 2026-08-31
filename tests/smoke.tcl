@@ -1,8 +1,8 @@
 # smoke.tcl
 #
-# Tcl-facing package smoke test.  Besides verifying that the shared library
+# Tcl-facing package smoke test. Besides verifying that the shared library
 # loads, this script creates a tiny synthetic V3 session and exercises the
-# presentation configuration API used by IRC callers.  No real game fixture is
+# presentation configuration API used by IRC callers. No real game fixture is
 # needed here; the synthetic file only has to contain a valid 64-byte header and
 # enough memory for the initial program counter.
 
@@ -17,7 +17,14 @@ if {[package present tclzmachine] ne "0.2.0"} {
     error "unexpected package version"
 }
 
-# Build a minimal 128-byte V3 story image.  The VM's loader validates the
+# `zmachine::key` is the explicit numeric ZSCII companion to line-oriented
+# `zmachine::command`. Behavioral read_char coverage lives in the C suite; this
+# smoke assertion catches an extension build which forgot to register the Tcl API.
+if {[namespace which ::zmachine::key] eq ""} {
+    error "zmachine::key command was not registered"
+}
+
+# Build a minimal 128-byte V3 story image. The VM's loader validates the
 # version, initial PC, static-memory base, and basic story length; it does not
 # execute this image during the configuration checks below.
 set story [string repeat "\x00" 128]
