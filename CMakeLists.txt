@@ -21,6 +21,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_file.c
     src/zmachine_header.c
     src/zmachine_input.c
+    src/zmachine_input_host.c
     src/zmachine_input_preload.c
     src/zmachine_object.c
     src/zmachine_property.c
@@ -59,11 +60,12 @@ set_source_files_properties(src/zmachine_file.c PROPERTIES
 #
 # The form-aware public cooperative loop now lives in zmachine_run.c. Keep the
 # previous loop compiled under a private legacy name while lifetime/story/output
-# responsibilities are still co-located in zmachine.c; a later cleanup can
-# remove that dead compatibility implementation without an API transition.
+# responsibilities are still co-located in zmachine.c. Host line-input validation
+# similarly wraps the original queue routine from zmachine.c so UTF-8/Tcl policy
+# remains outside the VM's story-management implementation.
 #
 set_source_files_properties(src/zmachine.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy"
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base"
 )
 
 #
