@@ -6,12 +6,13 @@
  * This file owns Tcl-visible session names, line/key input, presentation
  * options, and host file policy. Each session contains one independent ZMachine
  * instance. Ordinary VM execution remains unaware of IRC formatting and
- * filesystem naming; when a story requests either a full-game or auxiliary
- * save/restore, the VM yields and Tcl supplies the actual host path.
+ * filesystem naming; when a story requests a save/restore or external command
+ * stream file, the VM yields and Tcl supplies the actual host path.
  */
 
 #include "tclzmachine.h"
 #include "zmachine_decode.h"
+#include "zmachine_stream.h"
 #include "zmachine_wrap.h"
 
 #include <stdlib.h>
@@ -193,6 +194,28 @@ static const char *input_request_kind(const ZMachine *vm)
     return "";
 }
 
+/* Refuse player input while the VM is waiting for some host file decision. */
+static int reject_file_wait(Tcl_Interp *interp, const char *name, ZMachine *vm)
+{
+    if (!vm)
+        return TCL_OK;
+    if (vm->state == ZM_STATE_WAITING_SAVE ||
+        vm->state == ZM_STATE_WAITING_RESTORE) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s or zmachine::cancel",
+                          name,
+                          vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
+        return TCL_ERROR;
+    }
+    if (vm->state == ZM_STATE_WAITING_STREAM_FILE) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::streamfile or zmachine::cancel",
+                          name));
+        return TCL_ERROR;
+    }
+    return TCL_OK;
+}
+
 static int cmd_create(ClientData clientData, Tcl_Interp *interp,
                       int objc, Tcl_Obj *const objv[])
 {
@@ -264,22 +287,15 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
             Tcl_ObjPrintf("unknown session \"%s\"", name));
         return TCL_ERROR;
     }
-
-    if (s->vm->state == ZM_STATE_WAITING_SAVE ||
-        s->vm->state == ZM_STATE_WAITING_RESTORE) {
-        Tcl_SetObjResult(interp,
-            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s or zmachine::cancel",
-                          name,
-                          s->vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
+    if (reject_file_wait(interp, name, s->vm) != TCL_OK)
         return TCL_ERROR;
-    }
 
     if (zmachine_supply_input(s->vm, Tcl_GetString(objv[2])) != TCL_OK)
         return set_vm_failure(interp, s->vm);
     return run_session(interp, s);
 }
 
-/* Tcl command: zmachine::key session zscii -- satisfy a suspended read_char. */
+/* Tcl command: zmachine::key session zscii -- satisfy a suspended input key. */
 static int cmd_key(ClientData clientData, Tcl_Interp *interp,
                    int objc, Tcl_Obj *const objv[])
 {
@@ -300,15 +316,8 @@ static int cmd_key(ClientData clientData, Tcl_Interp *interp,
             Tcl_ObjPrintf("unknown session \"%s\"", name));
         return TCL_ERROR;
     }
-
-    if (s->vm->state == ZM_STATE_WAITING_SAVE ||
-        s->vm->state == ZM_STATE_WAITING_RESTORE) {
-        Tcl_SetObjResult(interp,
-            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s or zmachine::cancel",
-                          name,
-                          s->vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
+    if (reject_file_wait(interp, name, s->vm) != TCL_OK)
         return TCL_ERROR;
-    }
 
     if (Tcl_GetIntFromObj(interp, objv[2], &value) != TCL_OK)
         return TCL_ERROR;
@@ -321,6 +330,46 @@ static int cmd_key(ClientData clientData, Tcl_Interp *interp,
     if (zmachine_supply_key(s->vm, (uint16_t)value) != TCL_OK)
         return set_vm_failure(interp, s->vm);
     return run_session(interp, s);
+}
+
+/*
+ * Tcl command: zmachine::streamfile session kind path
+ *
+ * `kind` is replay, transcript, or record. A matching pending request is
+ * completed and execution resumes. The same command may also preconfigure a
+ * file before the story selects that stream, which is useful for V1/V2
+ * transcript support where stream 2 is selected directly through Flags 2.
+ */
+static int cmd_streamfile(ClientData clientData, Tcl_Interp *interp,
+                          int objc, Tcl_Obj *const objv[])
+{
+    ExtensionState *state = (ExtensionState *)clientData;
+    Session *s;
+    const char *name;
+    int resume;
+
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session kind path");
+        return TCL_ERROR;
+    }
+    name = Tcl_GetString(objv[1]);
+    s = find_session(state, name);
+    if (!s) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("unknown session \"%s\"", name));
+        return TCL_ERROR;
+    }
+
+    resume = s->vm->state == ZM_STATE_WAITING_STREAM_FILE;
+    if (zmachine_stream_file(s->vm,
+                             Tcl_GetString(objv[2]),
+                             Tcl_GetString(objv[3])) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    if (resume)
+        return run_session(interp, s);
+
+    Tcl_ResetResult(interp);
+    return TCL_OK;
 }
 
 static int cmd_save(ClientData clientData, Tcl_Interp *interp,
@@ -371,7 +420,7 @@ static int cmd_restore(ClientData clientData, Tcl_Interp *interp,
     return run_session(interp, s);
 }
 
-/* Tcl command: zmachine::cancel session -- decline pending save/restore. */
+/* Tcl command: zmachine::cancel session -- decline the pending host file. */
 static int cmd_cancel(ClientData clientData, Tcl_Interp *interp,
                       int objc, Tcl_Obj *const objv[])
 {
@@ -391,8 +440,13 @@ static int cmd_cancel(ClientData clientData, Tcl_Interp *interp,
         return TCL_ERROR;
     }
 
-    if (zmachine_cancel_file(s->vm) != TCL_OK)
-        return set_vm_failure(interp, s->vm);
+    if (s->vm->state == ZM_STATE_WAITING_STREAM_FILE) {
+        if (zmachine_cancel_stream_file(s->vm) != TCL_OK)
+            return set_vm_failure(interp, s->vm);
+    } else {
+        if (zmachine_cancel_file(s->vm) != TCL_OK)
+            return set_vm_failure(interp, s->vm);
+    }
     return run_session(interp, s);
 }
 
@@ -461,14 +515,13 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
  * Return session state and cooperative host-request metadata as a Tcl dict.
  *
  * inputRequest is empty unless the VM is suspended on input, in which case it
- * is `line` for VAR:4 read/sread/aread or `char` for VAR:22 read_char. This lets
- * an embedding application choose `zmachine::command` versus `zmachine::key`
- * without interpreting numeric VM states or decoding story memory itself.
+ * is `line` for VAR:4 read/sread/aread or `char` for VAR:22 read_char.
+ * streamRequest is replay, transcript, or record while a Z-machine stream
+ * selection is waiting for a host path. inputStream reports the currently
+ * selected Z-machine input source (0 keyboard/Tcl, 1 replay file).
  *
- * fileRequest remains the stable high-level save/restore indicator. When a
- * request is pending, fileRequestKind distinguishes full Quetzal state from a
- * V5+ auxiliary byte-region transfer. Auxiliary fields are always present so
- * callers can use straightforward dict access without testing for key existence.
+ * fileRequest remains the stable save/restore indicator. fileRequestKind
+ * distinguishes full Quetzal state from V5+ auxiliary byte-region transfers.
  */
 static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                     int objc, Tcl_Obj *const objv[])
@@ -527,6 +580,12 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewIntObj((int)s->vm->state));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("inputRequest", -1),
                    Tcl_NewStringObj(input_request, -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("inputStream", -1),
+                   Tcl_NewIntObj(zmachine_current_input_stream(s->vm)));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("streamRequest", -1),
+                   Tcl_NewStringObj(zmachine_pending_stream_request(s->vm), -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("commandRecording", -1),
+                   Tcl_NewBooleanObj(zmachine_command_recording_selected(s->vm)));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
                    Tcl_NewStringObj(file_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequestKind", -1),
@@ -598,6 +657,8 @@ int Tclzmachine_Init(Tcl_Interp *interp)
                          cmd_command, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::key",
                          cmd_key, state, NULL);
+    Tcl_CreateObjCommand(interp, "::zmachine::streamfile",
+                         cmd_streamfile, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::save",
                          cmd_save, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::restore",
