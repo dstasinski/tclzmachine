@@ -1,18 +1,25 @@
 /*
  * zmachine_key.c
  *
- * Numeric ZSCII keypress support for the cooperative read_char path.
+ * Numeric ZSCII keypress support for cooperative `read_char` and V5+ line
+ * termination.
  *
- * `zmachine::command` remains the line-oriented Tcl/IRC API. A separate key API
- * queues one exact ZSCII input code so cursor/function/extra characters do not
- * need to be guessed from a UTF-8 command string. Numeric keys are represented
- * internally as a two-byte pending-input sentinel (NUL, ZSCII); ordinary
- * `zmachine_supply_input()` uses a NUL-terminated C string and therefore cannot
- * create that representation accidentally.
+ * `zmachine::command` remains the ordinary line-oriented Tcl/IRC API. A
+ * separate numeric key API lets a host supply exact ZSCII keyboard events which
+ * cannot be represented safely as UTF-8 command text: cursor/function/keypad
+ * keys for `read_char`, and function keys named by a V5+ terminating-character
+ * table for `read`/`aread`.
+ *
+ * A key destined for `read_char` is represented internally as a private
+ * two-byte pending-input sentinel (NUL, ZSCII). A key terminating line input
+ * instead queues an empty line and records the exact code in
+ * pending_input_terminator. The normal line-input path can then preserve V5+
+ * preloaded text, tokenize it, and store the terminator without ever inserting
+ * the input-only function key into the story's text buffer.
  *
  * This module is an instruction-dispatch layer between lexical opcodes and the
- * existing presentation wrapper. It consumes only read_char when a numeric key
- * is pending and delegates every other instruction unchanged.
+ * existing presentation wrapper. It consumes only `read_char` when the private
+ * numeric sentinel is pending and delegates every other instruction unchanged.
  */
 
 #include "tclzmachine.h"
@@ -27,6 +34,8 @@ extern int zmachine_step_present(ZMachine *vm);
 #define ZM_DEFAULT_EXTRA_FIRST 155U
 #define ZM_DEFAULT_EXTRA_LAST 223U
 #define ZM_EXTRA_LAST 251U
+#define ZM_FUNCTION_FIRST 129U
+#define ZM_FUNCTION_LAST 154U
 
 /* Record a host/API diagnostic without destroying an otherwise resumable VM. */
 static int key_api_error(ZMachine *vm, const char *message)
@@ -107,44 +116,135 @@ static int zscii_input_defined(const ZMachine *vm, uint16_t zscii)
         return 1;
     if (zscii >= 32U && zscii <= 126U)
         return 1;
-    if (zscii >= 129U && zscii <= 154U)
+    if (zscii >= ZM_FUNCTION_FIRST && zscii <= ZM_FUNCTION_LAST)
         return 1;
-    if (zscii >= 155U && zscii <= 251U)
+    if (zscii >= ZM_DEFAULT_EXTRA_FIRST && zscii <= ZM_EXTRA_LAST)
         return extra_input_defined(vm, zscii);
     return 0;
 }
 
-/* Decode whether the VM is currently suspended on VAR:22 read_char. */
-static int current_is_read_char(ZMachine *vm, ZMachineInstruction *instruction)
+/*
+ * Identify the cooperative input opcode currently suspended at vm->pc.
+ *
+ * Return 1 for VAR:4 `read`, 2 for VAR:22 `read_char`, and zero otherwise.
+ * The run loop leaves the PC on the unexecuted instruction while waiting, so
+ * no additional input-kind state is necessary in ZMachine.
+ */
+static int current_input_kind(ZMachine *vm, ZMachineInstruction *instruction)
 {
     char decode_error[128];
 
-    if (!vm || !vm->memory || vm->version < 4U)
+    if (!vm || !vm->memory)
         return 0;
     if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
                                      vm->pc, instruction,
                                      decode_error, sizeof(decode_error)))
         return 0;
 
-    return instruction->form == ZM_FORM_VARIABLE &&
-           instruction->operand_count == ZM_OPERANDS_VAR &&
-           instruction->opcode_number == 22U;
+    if (instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return 0;
+    if (instruction->opcode_number == 4U)
+        return 1;
+    if (vm->version >= 4U && instruction->opcode_number == 22U)
+        return 2;
+    return 0;
 }
 
-/* Queue one exact numeric ZSCII key for a currently suspended read_char. */
+/*
+ * Check whether a V5+ function key is listed in header word $2e's table.
+ *
+ * The table is a zero-terminated byte list. Only function-key codes are legal
+ * there, and 255 means any function key. This text-only runtime deliberately
+ * exposes only keyboard function codes 129..154; mouse/menu codes 252..254 are
+ * not host-deliverable even if a story lists them.
+ *
+ * Return 1 when allowed, 0 when not listed/no table, and -1 for a malformed
+ * nonzero pointer or unterminated table. Malformation is reported as an API
+ * error rather than poisoning a resumable session merely because the host tried
+ * to supply a key.
+ */
+static int line_terminating_key_allowed(const ZMachine *vm, uint16_t zscii)
+{
+    uint16_t table;
+    size_t address;
+
+    if (!vm || !vm->memory || vm->version < 5U ||
+        zscii < ZM_FUNCTION_FIRST || zscii > ZM_FUNCTION_LAST)
+        return 0;
+    if (vm->memory_size <= 0x2fU)
+        return -1;
+
+    table = read_be16(vm->memory + 0x2eU);
+    if (table == 0U)
+        return 0;
+    if ((size_t)table >= vm->memory_size)
+        return -1;
+
+    for (address = table; address < vm->memory_size; ++address) {
+        uint8_t entry = vm->memory[address];
+
+        if (entry == 0U)
+            return 0;
+        if (entry == 255U || entry == (uint8_t)zscii)
+            return 1;
+    }
+
+    return -1;
+}
+
+/* Queue an exact numeric key for the cooperative input request at vm->pc. */
 int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
 {
     ZMachineInstruction instruction;
+    int input_kind;
     char encoded[2];
 
     if (!vm || !vm->memory)
         return TCL_ERROR;
     if (vm->state != ZM_STATE_WAITING_INPUT)
-        return key_api_error(vm, "Z-machine session is not waiting for character input");
-    if (!current_is_read_char(vm, &instruction))
-        return key_api_error(vm, "Z-machine session is waiting for line input, not read_char");
+        return key_api_error(vm, "Z-machine session is not waiting for input");
+
+    input_kind = current_input_kind(vm, &instruction);
+    if (input_kind == 0)
+        return key_api_error(vm, "Z-machine session is not suspended on a supported input opcode");
+
+    if (input_kind == 1) {
+        int allowed;
+
+        /* Enter always terminates a line in every version. */
+        if (zscii != 13U) {
+            if (vm->version < 5U ||
+                zscii < ZM_FUNCTION_FIRST || zscii > ZM_FUNCTION_LAST)
+                return key_api_error(vm,
+                    "line input accepts only Enter or an available terminating function key");
+
+            allowed = line_terminating_key_allowed(vm, zscii);
+            if (allowed < 0)
+                return key_api_error(vm,
+                    "malformed Z-machine terminating-character table");
+            if (!allowed)
+                return key_api_error(vm,
+                    "function key is not listed in the Z-machine terminating-character table");
+        }
+
+        /*
+         * Do not place an input-only function key in the text buffer. An empty
+         * pending line lets the normal V5 preload wrapper retain text already in
+         * the buffer, while pending_input_terminator carries the exact aread
+         * result back through the ordinary line-input engine.
+         */
+        Tcl_DStringSetLength(&vm->pending_input, 0);
+        vm->pending_input_terminator = zscii;
+        vm->input_available = 1;
+        vm->state = ZM_STATE_READY;
+        vm->error[0] = '\0';
+        return TCL_OK;
+    }
+
     if (!zscii_input_defined(vm, zscii))
-        return key_api_error(vm, "invalid, undefined, or unavailable ZSCII input key");
+        return key_api_error(vm,
+                             "invalid, undefined, or unavailable ZSCII input key");
 
     encoded[0] = '\0';
     encoded[1] = (char)(uint8_t)zscii;
@@ -156,7 +256,7 @@ int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
     return TCL_OK;
 }
 
-/* Return nonzero and decode the sentinel when a numeric key is pending. */
+/* Return nonzero and decode the sentinel when a numeric read_char key is pending. */
 static int pending_numeric_key(const ZMachine *vm, uint16_t *zscii)
 {
     const unsigned char *data;
@@ -187,8 +287,8 @@ int zmachine_step_input(ZMachine *vm)
     if (!pending_numeric_key(vm, &zscii))
         return zmachine_step_present(vm);
 
-    if (!current_is_read_char(vm, &instruction))
-        return key_vm_error(vm, "numeric key was queued outside read_char");
+    if (current_input_kind(vm, &instruction) != 2)
+        return key_vm_error(vm, "numeric read_char key was queued outside read_char");
     if (instruction.operand_count_actual < 1U)
         return key_vm_error(vm, "read_char is missing its input-device operand");
 
