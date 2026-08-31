@@ -47,6 +47,10 @@ static int lexical_error(ZMachine *vm, const char *message)
  *   text buffer, parse buffer, optional dictionary address, optional flag.
  * A zero/omitted dictionary selects the story's main dictionary. A nonzero flag
  * asks the tokenizer to leave parse entries for unrecognized words unchanged.
+ * Unlike V5+ `read`, tokenise does not define parse address zero as “skip
+ * lexical analysis”; its parse operand names the destination table and must be
+ * nonzero. Keeping that distinction here lets the shared tokenizer continue to
+ * accept zero only for the read-specific optional parse-buffer convention.
  *
  * encode_text operands are:
  *   source text address, source length, source offset, destination address.
@@ -87,6 +91,9 @@ int zmachine_step_tokenise(ZMachine *vm)
         if (instruction.operand_count_actual < 2U)
             return lexical_error(vm,
                                  "tokenise requires text and parse buffer operands");
+        if (values[1] == 0U)
+            return lexical_error(vm,
+                                 "tokenise requires a nonzero parse buffer address");
         if (instruction.operand_count_actual >= 3U)
             dictionary = values[2];
         if (instruction.operand_count_actual >= 4U)
