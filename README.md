@@ -42,14 +42,15 @@ The runtime now contains a working execution core rather than only starter scaff
 - Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
 - standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
 - cooperative `read` and `read_char` suspension/resumption
-- dictionary lookup and parse-buffer tokenization
+- dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
 - dynamically allocated one-level `save_undo` / `restore_undo` state restoration
 - cooperative full-game save/restore with Quetzal FORM IFZS persistence
 - Quetzal UMem writing plus UMem and compressed CMem restore support
 - optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, presentation, and wrapping behavior
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, presentation, tokenization, wrapping, and operand-side-effect behavior
+- repository-owned V3 and V5 end-to-end Tcl integration stories, including full-game save/restore
 - manual real-story compatibility probes
 
 ### Real-game compatibility reached so far
@@ -64,7 +65,7 @@ read leaflet
 inventory
 ```
 
-The local compatibility catalog currently completes its startup/input smoke probe for all 33 tested story files, including the V5 cases which previously exposed presentation-table, indirect-variable, and extended-opcode dispatch issues. This is a smoke-test milestone rather than a claim of complete Z-machine conformance.
+The local compatibility catalog has completed its startup/input smoke probe for all 33 tested story files, including V5 cases which exposed presentation-table, indirect-variable, null-object, lexical-opcode, and extended-opcode dispatch issues during development. This remains a smoke-test milestone rather than a claim of complete Z-machine conformance.
 
 Official story files themselves are **not** committed to this repository.
 
@@ -129,7 +130,7 @@ To tell the story that the player declined the filename request or that the host
 zmachine::cancel game1
 ```
 
-A successful save makes the story's save opcode return success. A successful restore transfers execution back to the original save point with the standard restored result. Cancel completes the pending save/restore with its normal failure result.
+A successful save makes the story's save opcode return success. A successful restore transfers execution back to the original save point with the version-appropriate restored result or branch behavior. Cancel completes the pending save/restore with its normal failure result.
 
 The generated save file is Quetzal `FORM IFZS`. tclzmachine writes the required `IFhd`, `UMem`, and `Stks` chunks and accepts either `UMem` or standard compressed `CMem` when restoring. Full-game save/restore is implemented; the separate operand-bearing V5+ save/restore forms for auxiliary memory-region files are not yet implemented.
 
@@ -225,23 +226,26 @@ tclsh tests/probe_session.tcl \
 
 When a story reaches an unimplemented opcode, the probe prints the VM diagnostic and session state so compatibility work can proceed from the exact failing instruction rather than by guessing.
 
-## Project test game
+## Project-owned integration games
 
-The first-release test plan includes a small purpose-built interactive-fiction fixture owned by this project. Both its human-readable source and compiled Z-machine story files will live under `tests/games/` so normal integration testing does not require an Inform compiler.
-
-Planned layout:
+The repository contains two purpose-built interactive-fiction fixtures under `tests/games/`. Their human-readable sources and compiled story files are both committed, so normal integration testing does not require an Inform compiler.
 
 ```text
 tests/games/
 ├── source/
-│   └── tclzmachine-test.inf
+│   ├── tclzmachine-test.inf
+│   └── tclzmachine-v3.inf
 ├── compiled/
-│   ├── tclzmachine-test.z3
-│   └── tclzmachine-test.z5
+│   ├── tclzmachine-test.z5
+│   └── tclzmachine-v3.z3
 └── README.md
 ```
 
-The fixture will exercise deterministic text output, input parsing, branches, arithmetic, routine calls, object movement, inventory, properties, state changes, save/restore, and quit behavior. Official games remain separate real-world compatibility tests.
+The V5 fixture uses the current Inform 6 standard library and exercises a real parser, object/inventory state, room movement, V5 lexical opcodes, and Quetzal save/restore through the public Tcl API.
+
+The V3 fixture deliberately uses no standard library so it can be a genuine Version 3 story with the current Inform compiler. Its scripted regression exercises the V1-V3 `sread` text-buffer format, V3 routine/call behavior, byte-sized object-tree links, `get_child`, `get_parent`, `insert_obj`, globals, branching, and V3 branch-form full-game save/restore. The restore test saves from inside a called routine, mutates both location and object ownership, then verifies that the saved call frame and world state are reconstructed.
+
+GitHub Actions rebuilds the deterministic fixtures from source and commits changed binaries back to `Frobnost`; ordinary CTest runs the committed binaries directly.
 
 ## Documentation requirement
 
@@ -249,13 +253,13 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 
 ## Implementation roadmap to 1.0
 
-1. Continue opcode compatibility work using real story files as probes.
+1. Continue systematic opcode compatibility work using real story files and focused project-owned fixtures as probes.
 2. Complete text-oriented handling for remaining safe presentation/status opcodes.
 3. Implement the operand-bearing V5+ auxiliary-file forms of `save` / `restore` if needed; full-game Quetzal persistence and in-memory undo are already implemented.
-4. Add the project-owned compiled Z3/Z5 integration game and scripted conversations.
-5. Broaden compatibility testing across representative V1-V5, V7, and V8 stories.
-6. Complete the source/header documentation audit.
-7. Harden error handling, malformed-story bounds checking, and API documentation.
+4. Broaden owned integration/compatibility coverage for V1, V2, V4, V7, and V8 where targeted fixtures add useful signal.
+5. Complete the source/header documentation audit, including implementation and test sources required by the 1.0 documentation standard.
+6. Harden malformed-story bounds checking, error diagnostics, and Tcl/API documentation.
+7. Run a final standards-oriented release audit beyond the current 33-story startup smoke catalog.
 
 ## Version-dependent rules
 
