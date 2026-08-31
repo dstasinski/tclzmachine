@@ -3,9 +3,10 @@
  *
  * Regression tests for presentation-oriented Z-machine behavior adapted to
  * the stream-oriented Tcl/IRC frontend. These tests cover layout no-ops,
- * cooperative character input, output-stream bookkeeping and routing,
- * print_table conversion to plain text, indirect-variable semantics, and
- * narrow legacy compatibility cases handled by the presentation dispatcher.
+ * cooperative character input, exact numeric ZSCII keys, output-stream
+ * bookkeeping and routing, print_table conversion to plain text, indirect-
+ * variable semantics, and narrow legacy compatibility cases handled by the
+ * presentation dispatcher.
  */
 
 #include "tclzmachine.h"
@@ -289,6 +290,47 @@ int main(void)
     assert(Tcl_DStringLength(&vm.output) == 0);
 
     free_vm(&vm);
+
+    /*
+     * Numeric ZSCII input bypasses the old printable-ASCII command-string
+     * adaptation. Cursor-up (129) and the first default extra character (155)
+     * must be delivered exactly to read_char. Undefined/reserved keys are API
+     * errors only: they leave the VM suspended and can be followed by a valid
+     * key without resetting or losing the input request.
+     */
+    init_vm(&vm, 5U, 512U);
+    vm.pc = 0x20U;
+    vm.memory[0x20U] = 0xF6U; /* read_char 1 -> g16 */
+    vm.memory[0x21U] = 0x7FU;
+    vm.memory[0x22U] = 1U;
+    vm.memory[0x23U] = 0x10U;
+    vm.memory[0x24U] = 0xBAU; /* quit */
+    assert(zmachine_run(&vm) == TCL_OK);
+    assert(vm.state == ZM_STATE_WAITING_INPUT && vm.pc == 0x20U);
+    assert(zmachine_supply_key(&vm, 127U) == TCL_ERROR);
+    assert(vm.state == ZM_STATE_WAITING_INPUT && vm.pc == 0x20U);
+    assert(zmachine_supply_key(&vm, 224U) == TCL_ERROR);
+    assert(vm.state == ZM_STATE_WAITING_INPUT && vm.pc == 0x20U);
+    assert(zmachine_supply_key(&vm, 129U) == TCL_OK);
+    assert(zmachine_run(&vm) == TCL_OK);
+    assert(vm.state == ZM_STATE_HALTED);
+    assert(read_global(&vm, 0x10U) == 129U);
+    free_vm(&vm);
+
+    init_vm(&vm, 5U, 512U);
+    vm.pc = 0x20U;
+    vm.memory[0x20U] = 0xF6U;
+    vm.memory[0x21U] = 0x7FU;
+    vm.memory[0x22U] = 1U;
+    vm.memory[0x23U] = 0x10U;
+    vm.memory[0x24U] = 0xBAU;
+    assert(zmachine_run(&vm) == TCL_OK);
+    assert(vm.state == ZM_STATE_WAITING_INPUT);
+    assert(zmachine_supply_key(&vm, 155U) == TCL_OK);
+    assert(zmachine_run(&vm) == TCL_OK);
+    assert(read_global(&vm, 0x10U) == 155U);
+    free_vm(&vm);
+
     puts("presentation opcode tests passed");
     return 0;
 }
