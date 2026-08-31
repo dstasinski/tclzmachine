@@ -1,0 +1,80 @@
+/*
+ * zmachine_tokenise.c
+ *
+ * Lexical-opcode layer for the Version 5+ `tokenise` instruction.
+ *
+ * Line-oriented `read` is handled by the cooperative run loop because it may
+ * suspend waiting for Tcl input. `tokenise` never blocks: it analyzes text
+ * already present in story memory. Keeping this small layer adjacent to the
+ * input subsystem lets both operations share one dictionary/tokenization
+ * implementation without moving host input policy into the ordinary executor.
+ */
+
+#include "tclzmachine.h"
+#include "zmachine_decode.h"
+#include "zmachine_exec.h"
+#include "zmachine_input.h"
+
+#include <stdio.h>
+
+/* Presentation wrapper supplied by zmachine_dispatch.c after symbol rename. */
+extern int zmachine_step_present(ZMachine *vm);
+
+static int tokenise_error(ZMachine *vm, const char *message)
+{
+    if (vm) {
+        vm->state = ZM_STATE_ERROR;
+        snprintf(vm->error, sizeof(vm->error), "%s", message);
+    }
+    return TCL_ERROR;
+}
+
+/*
+ * Execute one instruction, consuming VAR:27 locally and delegating everything
+ * else to the presentation/core layers.
+ */
+int zmachine_step_tokenise(ZMachine *vm)
+{
+    ZMachineInstruction instruction;
+    uint16_t values[ZM_MAX_OPERANDS];
+    uint16_t dictionary = 0U;
+    int preserve_unrecognized = 0;
+    char decode_error[128];
+
+    if (!vm || !vm->memory)
+        return tokenise_error(vm, "cannot execute without a loaded story");
+
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, &instruction,
+                                     decode_error, sizeof(decode_error))) {
+        return tokenise_error(vm, decode_error[0] ? decode_error :
+                              "unable to decode Z-machine instruction");
+    }
+
+    if (vm->version < 5U ||
+        instruction.form != ZM_FORM_VARIABLE ||
+        instruction.operand_count != ZM_OPERANDS_VAR ||
+        instruction.opcode_number != 27U)
+        return zmachine_step_present(vm);
+
+    if (instruction.operand_count_actual < 2U)
+        return tokenise_error(vm,
+                              "tokenise requires text and parse buffer operands");
+
+    if (zmachine_resolve_operands(vm, &instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    if (instruction.operand_count_actual >= 3U)
+        dictionary = values[2];
+    if (instruction.operand_count_actual >= 4U)
+        preserve_unrecognized = values[3] != 0U;
+
+    if (zmachine_input_tokenize_buffer(vm, values[0], values[1],
+                                       dictionary,
+                                       preserve_unrecognized) != TCL_OK)
+        return tokenise_error(vm, "unable to tokenize Z-machine text buffer");
+
+    vm->pc = instruction.next_pc;
+    return TCL_OK;
+}
