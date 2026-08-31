@@ -6,12 +6,14 @@
  * This file owns Tcl-visible session names, line/key input, presentation
  * options, and host file policy. Each session contains one independent ZMachine
  * instance. Ordinary VM execution remains unaware of IRC formatting and
- * filesystem naming; when a story requests a save/restore or external command
- * stream file, the VM yields and Tcl supplies the actual host path.
+ * filesystem naming; optional mIRC rendering is selected here at the host-facing
+ * presentation boundary. When a story requests a save/restore or external
+ * command stream file, the VM yields and Tcl supplies the actual host path.
  */
 
 #include "tclzmachine.h"
 #include "zmachine_decode.h"
+#include "zmachine_mirc.h"
 #include "zmachine_stream.h"
 #include "zmachine_wrap.h"
 
@@ -72,27 +74,49 @@ static void free_state(ClientData clientData, Tcl_Interp *interp)
     free(state);
 }
 
-/* Convert the session's canonical VM output to its Tcl-facing result. */
+static const char *session_output_format(const Session *s)
+{
+    return s && s->vm && zmachine_mirc_enabled(s->vm) ? "mirc" : "plain";
+}
+
+/* Convert VM output to the representation selected by the Tcl host. */
 static int set_session_output(Tcl_Interp *interp, Session *s)
 {
+    const char *text;
+    int length;
+    int mirc;
+
     if (!interp || !s || !s->vm)
         return TCL_ERROR;
 
+    mirc = zmachine_mirc_enabled(s->vm);
+    if (mirc) {
+        text = zmachine_mirc_output_data(s->vm);
+        length = zmachine_mirc_output_length(s->vm);
+    } else {
+        text = zmachine_output_data(s->vm);
+        length = zmachine_output_length(s->vm);
+    }
+
     if (s->wordwrap_bytes == 0U) {
-        Tcl_SetObjResult(interp,
-            Tcl_NewStringObj(zmachine_output_data(s->vm),
-                             zmachine_output_length(s->vm)));
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(text, length));
         return TCL_OK;
     }
 
     {
         Tcl_DString wrapped;
-        Tcl_DStringInit(&wrapped);
+        int rc;
 
-        if (zmachine_wrap_output(zmachine_output_data(s->vm),
-                                 (size_t)zmachine_output_length(s->vm),
-                                 s->wordwrap_bytes,
-                                 &wrapped) != TCL_OK) {
+        Tcl_DStringInit(&wrapped);
+        if (mirc) {
+            rc = zmachine_mirc_wrap_output(text, (size_t)length,
+                                           s->wordwrap_bytes, &wrapped);
+        } else {
+            rc = zmachine_wrap_output(text, (size_t)length,
+                                      s->wordwrap_bytes, &wrapped);
+        }
+
+        if (rc != TCL_OK) {
             Tcl_DStringFree(&wrapped);
             Tcl_SetObjResult(interp,
                 Tcl_NewStringObj("unable to word-wrap game output", -1));
@@ -460,7 +484,7 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
 
     if (objc < 2 || objc > 4) {
         Tcl_WrongNumArgs(interp, 1, objv,
-                         "session ?-wordwrap ?bytes??");
+                         "session ?-wordwrap|-format ?value??");
         return TCL_ERROR;
     }
 
@@ -477,38 +501,71 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
         Tcl_DictObjPut(interp, dict,
                        Tcl_NewStringObj("-wordwrap", -1),
                        Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
+        Tcl_DictObjPut(interp, dict,
+                       Tcl_NewStringObj("-format", -1),
+                       Tcl_NewStringObj(session_output_format(s), -1));
         Tcl_SetObjResult(interp, dict);
         return TCL_OK;
     }
 
     option = Tcl_GetString(objv[2]);
-    if (strcmp(option, "-wordwrap") != 0) {
-        Tcl_SetObjResult(interp,
-            Tcl_ObjPrintf("unknown option \"%s\": must be -wordwrap", option));
-        return TCL_ERROR;
-    }
+    if (strcmp(option, "-wordwrap") == 0) {
+        if (objc == 3) {
+            Tcl_SetObjResult(interp,
+                Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
+            return TCL_OK;
+        }
 
-    if (objc == 3) {
+        {
+            Tcl_WideInt value;
+            if (Tcl_GetWideIntFromObj(interp, objv[3], &value) != TCL_OK)
+                return TCL_ERROR;
+            if (value < 0) {
+                Tcl_SetObjResult(interp,
+                    Tcl_NewStringObj("-wordwrap must be zero or a positive byte count", -1));
+                return TCL_ERROR;
+            }
+            s->wordwrap_bytes = (size_t)value;
+        }
+
         Tcl_SetObjResult(interp,
             Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
         return TCL_OK;
     }
 
-    {
-        Tcl_WideInt value;
-        if (Tcl_GetWideIntFromObj(interp, objv[3], &value) != TCL_OK)
-            return TCL_ERROR;
-        if (value < 0) {
+    if (strcmp(option, "-format") == 0) {
+        const char *format;
+        int enabled;
+
+        if (objc == 3) {
             Tcl_SetObjResult(interp,
-                Tcl_NewStringObj("-wordwrap must be zero or a positive byte count", -1));
+                Tcl_NewStringObj(session_output_format(s), -1));
+            return TCL_OK;
+        }
+
+        format = Tcl_GetString(objv[3]);
+        if (strcmp(format, "plain") == 0)
+            enabled = 0;
+        else if (strcmp(format, "mirc") == 0)
+            enabled = 1;
+        else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown output format \"%s\": must be plain or mirc",
+                              format));
             return TCL_ERROR;
         }
-        s->wordwrap_bytes = (size_t)value;
+
+        if (zmachine_mirc_set_enabled(s->vm, enabled) != TCL_OK)
+            return set_vm_failure(interp, s->vm);
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj(session_output_format(s), -1));
+        return TCL_OK;
     }
 
     Tcl_SetObjResult(interp,
-        Tcl_NewWideIntObj((Tcl_WideInt)s->wordwrap_bytes));
-    return TCL_OK;
+        Tcl_ObjPrintf("unknown option \"%s\": must be -wordwrap or -format",
+                      option));
+    return TCL_ERROR;
 }
 
 /*
@@ -519,6 +576,8 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
  * streamRequest is replay, transcript, or record while a Z-machine stream
  * selection is waiting for a host path. inputStream reports the currently
  * selected Z-machine input source (0 keyboard/Tcl, 1 replay file).
+ * outputFormat is `plain` by default or `mirc` when the host has enabled the
+ * optional IRC presentation renderer.
  *
  * fileRequest remains the stable save/restore indicator. fileRequestKind
  * distinguishes full Quetzal state from V5+ auxiliary byte-region transfers.
@@ -586,6 +645,8 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewStringObj(zmachine_pending_stream_request(s->vm), -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("commandRecording", -1),
                    Tcl_NewBooleanObj(zmachine_command_recording_selected(s->vm)));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("outputFormat", -1),
+                   Tcl_NewStringObj(session_output_format(s), -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
                    Tcl_NewStringObj(file_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequestKind", -1),
