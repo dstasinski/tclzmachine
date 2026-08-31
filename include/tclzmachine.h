@@ -37,6 +37,13 @@ typedef struct ZMachineUndoState ZMachineUndoState;
  */
 typedef struct ZMachineStreamIO ZMachineStreamIO;
 
+/*
+ * Opaque presentation state for optional mIRC rendering. Canonical VM output
+ * remains plain UTF-8; this object exists only when a story uses presentation
+ * opcodes or a Tcl host enables the `mirc` output format.
+ */
+typedef struct ZMachineMircState ZMachineMircState;
+
 /* Coarse execution state visible to the Tcl-facing session layer. */
 typedef enum ZMachineRunState {
     ZM_STATE_READY = 0,
@@ -81,6 +88,10 @@ struct ZMachine {
 
     /* Optional replay/transcript/command-record host stream state. */
     ZMachineStreamIO *stream_io;
+
+    /* Optional host-facing mIRC renderer state and capability selection. */
+    ZMachineMircState *mirc_state;
+    int mirc_output_enabled;
 
     /* Cached fields from the story-file header. */
     uint8_t version;
