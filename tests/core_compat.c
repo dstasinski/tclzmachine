@@ -74,16 +74,34 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* verify branches when the checksum of bytes 0x40..EOF is correct. */
+    /*
+     * verify checks the original story-file bytes, not mutable state of play.
+     * Bytes at/above 0x40 are part of the checksum even when they are dynamic;
+     * changing them after the pristine restart image is captured must not make
+     * a valid story fail its checksum.
+     */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 128U);
         vm.declared_file_length = vm.memory_size;
-        vm.checksum = 0U; /* all bytes from 0x40 onward are zero */
+        vm.memory[0x40U] = 0x12U;
+        vm.memory[0x50U] = 0x34U;
+        vm.checksum = 0x0046U;
         vm.memory[0x20U] = 0xBDU; /* verify */
         vm.memory[0x21U] = 0xC4U; /* branch true by +4 -> 0x24 */
         vm.memory[0x22U] = 0xBAU; /* false-path quit */
         vm.memory[0x24U] = 0xBAU; /* true-path quit */
+
+        vm.initial_dynamic_memory_size = vm.static_memory_addr;
+        vm.initial_dynamic_memory =
+            (uint8_t *)malloc(vm.initial_dynamic_memory_size);
+        assert(vm.initial_dynamic_memory != NULL);
+        memcpy(vm.initial_dynamic_memory, vm.memory,
+               vm.initial_dynamic_memory_size);
+
+        /* Simulate ordinary game/interpreter changes after the story loaded. */
+        vm.memory[0x40U] = 0x99U;
+        vm.memory[0x50U] = 0x88U;
 
         assert(zmachine_run(&vm) == TCL_OK);
         assert(vm.pc == 0x25U);
