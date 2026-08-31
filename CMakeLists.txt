@@ -155,6 +155,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(core-extra-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME core-extra-opcodes COMMAND core-extra-test)
 
+    add_executable(io-compat-test tests/io_compat.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(io-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(io-compat-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME embedded-io-compat COMMAND io-compat-test)
+
     add_executable(property-length-test tests/property_length.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(property-length-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(property-length-test PRIVATE ${TCL_LIBRARY})
