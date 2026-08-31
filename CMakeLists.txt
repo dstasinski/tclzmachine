@@ -16,6 +16,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_dispatch.c
     src/zmachine_core_extra.c
     src/zmachine_exec.c
+    src/zmachine_file_aux.c
     src/zmachine_file.c
     src/zmachine_header.c
     src/zmachine_input.c
@@ -33,19 +34,24 @@ set(TCLZMACHINE_VM_SOURCES
 
 #
 # Instruction execution is layered so each module owns one concern:
-#   zmachine_file.c       public zmachine_step(), cooperative file requests
+#   zmachine_file_aux.c   public step/file API, V5+ auxiliary byte-region files
+#   zmachine_file.c       full-game Quetzal file-request base layer
 #   zmachine_tokenise.c   non-blocking lexical analysis opcodes
 #   zmachine_dispatch.c   presentation/text-only compatibility wrapper
 #   zmachine_core_extra.c pure control/arithmetic completeness opcodes
 #   zmachine_exec.c       original ordinary core opcode executor
-# The original core and presentation implementations are renamed at compile
-# time so each wrapper can delegate downward without duplicating public APIs.
+# The lower implementations are renamed at compile time so each wrapper can
+# delegate downward without duplicating public APIs or mixing host policy into
+# ordinary VM execution.
 #
 set_source_files_properties(src/zmachine_exec.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core_base"
 )
 set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
+)
+set_source_files_properties(src/zmachine_file.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_file_base;zmachine_save_file=zmachine_save_file_base;zmachine_restore_file=zmachine_restore_file_base;zmachine_cancel_file=zmachine_cancel_file_base"
 )
 
 #
@@ -159,6 +165,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(io-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(io-compat-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME embedded-io-compat COMMAND io-compat-test)
+
+    add_executable(file-aux-test tests/file_aux.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(file-aux-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(file-aux-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME auxiliary-file-io COMMAND file-aux-test)
 
     add_executable(property-length-test tests/property_length.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(property-length-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
