@@ -21,6 +21,20 @@ proc require_contains {label text needle} {
     }
 }
 
+# Execute one player turn while preserving the VM's diagnostic location.  The
+# Tcl extension intentionally returns the concise VM error string, so this test
+# adds zmachine::info when a real-story regression fails to make the exact PC
+# and run state visible in CTest/GitHub Actions output.
+proc run_command {session command} {
+    if {[catch {zmachine::command $session $command} result options]} {
+        set info "unavailable"
+        catch {set info [zmachine::info $session]}
+        return -options $options \
+            "command [list $command] failed: $result\nSession information: $info"
+    }
+    return $result
+}
+
 load $extension Tclzmachine
 package require tclzmachine
 
@@ -40,30 +54,30 @@ try {
 
     # The first command also boots the story.  Require only project-owned text,
     # not the Inform library's surrounding banner/prompt formatting.
-    set output [zmachine::command integration "look"]
+    set output [run_command integration "look"]
     require_contains "look" $output "tclzmachine integration fixture ready."
     require_contains "look" $output "You are in a small test laboratory."
 
     # Move a real object through the Inform parser and verify that the object
     # remains in inventory on the following, separate Tcl call.
-    set output [zmachine::command integration "take lamp"]
+    set output [run_command integration "take lamp"]
     require_contains "take lamp" $output "Taken."
 
-    set output [zmachine::command integration "inventory"]
+    set output [run_command integration "inventory"]
     require_contains "inventory" $output "brass lamp"
 
     # Room movement exercises parser routines, object properties, branches,
     # calls/returns, and persistent location state in the VM.
-    set output [zmachine::command integration "north"]
+    set output [run_command integration "north"]
     require_contains "north" $output "North Room"
     require_contains "north" $output "This is the north room."
 
-    set output [zmachine::command integration "south"]
+    set output [run_command integration "south"]
     require_contains "south" $output "Test Lab"
     require_contains "south" $output "You are in a small test laboratory."
 
     # Inventory must still contain the lamp after two room transitions.
-    set output [zmachine::command integration "inventory"]
+    set output [run_command integration "inventory"]
     require_contains "final inventory" $output "brass lamp"
 
     set info [zmachine::info integration]
