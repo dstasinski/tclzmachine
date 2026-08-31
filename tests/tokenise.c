@@ -6,10 +6,10 @@
  *
  * The test exercises the public instruction path, the main story dictionary,
  * the optional user-dictionary operand, dictionary separators, parse-buffer
- * positions, the flag which preserves slots for unrecognized words, direct
- * six-byte dictionary encoding of an explicit story-memory slice, and the
- * distinction between read's special parse=0 convention and tokenise's required
- * parse-table destination.
+ * positions, the flag which preserves slots for unrecognized words, exact
+ * dictionary encryption (including A2, truncation, and custom alphabets), and
+ * the distinction between read's special parse=0 convention and tokenise's
+ * required parse-table destination.
  */
 
 #include "tclzmachine.h"
@@ -47,6 +47,15 @@ int main(void)
     };
     static const uint8_t encoded_mystery[6] = {
         0x4BU, 0xD8U, 0x65U, 0x57U, 0xF8U, 0xA5U
+    };
+    static const uint8_t encoded_zero[6] = {
+        0x15U, 0x05U, 0x14U, 0xA5U, 0x94U, 0xA5U
+    };
+    static const uint8_t encoded_partial_escape[6] = {
+        0x18U, 0xC6U, 0x18U, 0xC6U, 0x94U, 0xC3U
+    };
+    static const uint8_t encoded_custom_at[6] = {
+        0x10U, 0xC5U, 0x14U, 0xA5U, 0x94U, 0xA5U
     };
     static const char text[] = "look, mystery";
     ZMachine vm;
@@ -130,18 +139,76 @@ int main(void)
     assert(vm.pc == 0x56U);
     assert(memcmp(vm.memory + 0xA0U, encoded_look, 6U) == 0);
 
+    /* Default A2/8 is digit zero; A2/6 is the ZSCII escape, not '0'. */
+    vm.memory[0x70U] = (uint8_t)'0';
+    memset(vm.memory + 0xB0U, 0, 6U);
+    vm.pc = 0x58U;
+    vm.memory[0x58U] = 0xFCU;
+    vm.memory[0x59U] = 0x55U;
+    vm.memory[0x5AU] = 0x70U;
+    vm.memory[0x5BU] = 1U;
+    vm.memory[0x5CU] = 0U;
+    vm.memory[0x5DU] = 0xB0U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x5EU);
+    assert(memcmp(vm.memory + 0xB0U, encoded_zero, 6U) == 0);
+
+    /*
+     * Six direct 'a' Z-characters leave only three slots for '~'. Since '~'
+     * needs shift-A2, escape, high, low, the low five bits are intentionally
+     * truncated and the preceding three construction Z-characters remain.
+     */
+    memcpy(vm.memory + 0x72U, "aaaaaa~", 7U);
+    memset(vm.memory + 0xB8U, 0, 6U);
+    vm.pc = 0x68U;
+    vm.memory[0x68U] = 0xFCU;
+    vm.memory[0x69U] = 0x55U;
+    vm.memory[0x6AU] = 0x72U;
+    vm.memory[0x6BU] = 7U;
+    vm.memory[0x6CU] = 0U;
+    vm.memory[0x6DU] = 0xB8U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x6EU);
+    assert(memcmp(vm.memory + 0xB8U, encoded_partial_escape, 6U) == 0);
+
+    /*
+     * Install a V5 custom alphabet table whose A1 Z-character 6 is '@'. Input
+     * is lowercased first, then all custom alphabets are searched; the encoded
+     * key therefore begins with shift-A1 (4), then Z-character 6.
+     */
+    vm.memory[0x34U] = 0x01U;
+    vm.memory[0x35U] = 0x80U;
+    memset(vm.memory + 0x180U, 0xFF, 78U);
+    vm.memory[0x180U + 26U] = (uint8_t)'@';
+    vm.memory[0x71U] = (uint8_t)'@';
+    memset(vm.memory + 0xC0U, 0, 6U);
+    vm.pc = 0x78U;
+    vm.memory[0x78U] = 0xFCU;
+    vm.memory[0x79U] = 0x55U;
+    vm.memory[0x7AU] = 0x71U;
+    vm.memory[0x7BU] = 1U;
+    vm.memory[0x7CU] = 0U;
+    vm.memory[0x7DU] = 0xC0U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x7EU);
+    assert(memcmp(vm.memory + 0xC0U, encoded_custom_at, 6U) == 0);
+
+    /* Restore default alphabets before testing the tokenise error path. */
+    vm.memory[0x34U] = 0U;
+    vm.memory[0x35U] = 0U;
+
     /*
      * VAR:27 has no read-style “parse zero means skip parsing” convention.
      * Rejecting it here prevents a silent successful no-op and makes the
      * malformed destination visible to the embedding application.
      */
-    vm.pc = 0x60U;
+    vm.pc = 0xD0U;
     vm.state = ZM_STATE_READY;
     vm.error[0] = '\0';
-    vm.memory[0x60U] = 0xFBU;
-    vm.memory[0x61U] = 0x5FU;
-    vm.memory[0x62U] = 0x40U;
-    vm.memory[0x63U] = 0U;
+    vm.memory[0xD0U] = 0xFBU;
+    vm.memory[0xD1U] = 0x5FU;
+    vm.memory[0xD2U] = 0x40U;
+    vm.memory[0xD3U] = 0U;
     assert(zmachine_step(&vm) == TCL_ERROR);
     assert(vm.state == ZM_STATE_ERROR);
     assert(strstr(vm.error, "nonzero parse buffer") != NULL);
