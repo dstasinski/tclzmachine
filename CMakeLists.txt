@@ -11,6 +11,7 @@ find_package(TCL 8.6 REQUIRED)
 
 set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
+    src/zmachine_run.c
     src/zmachine_decode.c
     src/zmachine_dispatch.c
     src/zmachine_core_extra.c
@@ -45,6 +46,16 @@ set_source_files_properties(src/zmachine_exec.c PROPERTIES
 )
 set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
+)
+
+#
+# The form-aware public cooperative loop now lives in zmachine_run.c. Keep the
+# previous loop compiled under a private legacy name while lifetime/story/output
+# responsibilities are still co-located in zmachine.c; a later cleanup can
+# remove that dead compatibility implementation without an API transition.
+#
+set_source_files_properties(src/zmachine.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy"
 )
 
 #
@@ -128,6 +139,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(input-preload-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(input-preload-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME input-preload COMMAND input-preload-test)
+
+    add_executable(run-form-dispatch-test tests/run_form_dispatch.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(run-form-dispatch-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(run-form-dispatch-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME run-form-dispatch COMMAND run-form-dispatch-test)
 
     add_executable(core-compat-test tests/core_compat.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(core-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
