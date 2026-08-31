@@ -15,6 +15,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_dispatch.c
     src/zmachine_exec.c
     src/zmachine_file.c
+    src/zmachine_header.c
     src/zmachine_input.c
     src/zmachine_object.c
     src/zmachine_property.c
