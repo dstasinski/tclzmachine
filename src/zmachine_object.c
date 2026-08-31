@@ -153,8 +153,25 @@ int zmachine_object_get_parent(const ZMachine *vm, uint16_t object, uint16_t *pa
 { return get_relation(vm, object, 0, parent); }
 int zmachine_object_get_sibling(const ZMachine *vm, uint16_t object, uint16_t *sibling)
 { return get_relation(vm, object, 1, sibling); }
+/*
+ * Treat object zero as the null object for get_child only.
+ *
+ * There is no object-table entry for zero, but legacy story code can ask for
+ * its child and expect the ordinary "no child" result.  Handling the case here
+ * is important because opcode operands have already been resolved by the core;
+ * a VARIABLE operand naming stack variable 0 must be popped exactly once before
+ * its runtime value is tested.  Other object operations remain strict.
+ */
 int zmachine_object_get_child(const ZMachine *vm, uint16_t object, uint16_t *child)
-{ return get_relation(vm, object, 2, child); }
+{
+    if (!vm || !child)
+        return TCL_ERROR;
+    if (object == 0U) {
+        *child = 0U;
+        return TCL_OK;
+    }
+    return get_relation(vm, object, 2, child);
+}
 int zmachine_object_set_parent(ZMachine *vm, uint16_t object, uint16_t parent)
 { return set_relation(vm, object, 0, parent); }
 int zmachine_object_set_sibling(ZMachine *vm, uint16_t object, uint16_t sibling)
