@@ -41,7 +41,8 @@ jobs:
             inform6-compiler \
             inform6-library \
             tcl8.6 \
-            tcl8.6-dev
+            tcl8.6-dev \
+            tk8.6-dev
 
       - name: Configure Debug build
         run: |
