@@ -228,9 +228,10 @@ int zmachine_save_file(ZMachine *vm, const char *path)
  *
  * Restore is transactional inside the Quetzal layer. Failure leaves the current
  * WAITING_RESTORE request retryable. Success replaces the state of play and
- * resumes the save point stored in the file: V1-V3 take the saved save branch;
- * V4+ store 2 into the original save instruction's destination. The current
- * restore opcode never completes normally on a successful restore.
+ * refreshes all interpreter-owned/Rst header fields before resuming the saved
+ * save point: V1-V3 take the saved save branch; V4+ store 2 into the original
+ * save instruction's destination. The current restore opcode never completes
+ * normally on a successful restore.
  */
 int zmachine_restore_file(ZMachine *vm, const char *path)
 {
@@ -243,6 +244,7 @@ int zmachine_restore_file(ZMachine *vm, const char *path)
     if (zmachine_quetzal_restore(vm, path, &saved_pc) != TCL_OK)
         return TCL_ERROR; /* Current request remains retryable or cancellable. */
 
+    zmachine_refresh_interpreter_header(vm);
     vm->pending_file_pc = 0U;
     vm->error[0] = '\0';
 
