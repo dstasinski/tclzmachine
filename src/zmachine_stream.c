@@ -50,6 +50,18 @@ typedef enum StreamRequestKind {
     STREAM_REQUEST_RECORD
 } StreamRequestKind;
 
+/*
+ * Internal result from prepare_replay_input(). Keep successful queuing distinct
+ * from Tcl's public status values: TCL_ERROR is numerically 1, so using 1 as a
+ * private "queued" sentinel would make every successfully read replay record
+ * look like an interpreter error to the run wrapper.
+ */
+typedef enum ReplayPrepareResult {
+    REPLAY_PREPARE_EOF = 0,
+    REPLAY_PREPARE_ERROR = TCL_ERROR,
+    REPLAY_PREPARE_QUEUED = 2
+} ReplayPrepareResult;
+
 struct ZMachineStreamIO {
     FILE *replay;
     FILE *transcript;
@@ -426,31 +438,39 @@ static int prepare_replay_input(ZMachine *vm)
     size_t i;
 
     if (!vm || !vm->stream_io || vm->stream_io->input_stream != 1U)
-        return 0;
+        return REPLAY_PREPARE_EOF;
     io = vm->stream_io;
     if (!io->replay) {
         io->input_stream = 0U;
-        return 0;
+        return REPLAY_PREPARE_EOF;
     }
-    if (!current_input_opcode(vm, &instruction))
-        return stream_vm_error(vm, "command replay reached an unknown input wait");
+    if (!current_input_opcode(vm, &instruction)) {
+        stream_vm_error(vm, "command replay reached an unknown input wait");
+        return REPLAY_PREPARE_ERROR;
+    }
 
     if (!fgets(line, (int)sizeof(line), io->replay)) {
-        if (ferror(io->replay))
-            return stream_vm_error(vm, "unable to read command replay file");
+        if (ferror(io->replay)) {
+            stream_vm_error(vm, "unable to read command replay file");
+            return REPLAY_PREPARE_ERROR;
+        }
         close_file(&io->replay);
         io->input_stream = 0U;
-        return 0; /* EOF returns input control to the keyboard host. */
+        return REPLAY_PREPARE_EOF; /* EOF returns input to the keyboard host. */
     }
 
     len = strlen(line);
-    if (len == sizeof(line) - 1U && line[len - 1U] != '\n')
-        return stream_vm_error(vm, "command replay line is too long");
+    if (len == sizeof(line) - 1U && line[len - 1U] != '\n') {
+        stream_vm_error(vm, "command replay line is too long");
+        return REPLAY_PREPARE_ERROR;
+    }
     while (len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r'))
         line[--len] = '\0';
 
-    if (!parse_trailing_marker(line, &marker, &has_marker))
-        return stream_vm_error(vm, "invalid numeric marker in command replay file");
+    if (!parse_trailing_marker(line, &marker, &has_marker)) {
+        stream_vm_error(vm, "invalid numeric marker in command replay file");
+        return REPLAY_PREPARE_ERROR;
+    }
 
     if (instruction.opcode_number == 22U) {
         uint16_t key;
@@ -461,26 +481,33 @@ static int prepare_replay_input(ZMachine *vm)
                    (unsigned char)line[0] <= 126U) {
             key = (uint8_t)line[0];
         } else {
-            return stream_vm_error(vm,
-                                   "read_char replay record must contain one character or [N]");
+            stream_vm_error(vm,
+                            "read_char replay record must contain one character or [N]");
+            return REPLAY_PREPARE_ERROR;
         }
-        return zmachine_supply_key(vm, key) == TCL_OK ? 1 : TCL_ERROR;
+        if (zmachine_supply_key(vm, key) != TCL_OK)
+            return REPLAY_PREPARE_ERROR;
+        return REPLAY_PREPARE_QUEUED;
     }
 
     if (has_marker && marker != 13U &&
-        (marker < 129U || marker > 154U))
-        return stream_vm_error(vm, "invalid line terminator in command replay file");
+        (marker < 129U || marker > 154U)) {
+        stream_vm_error(vm, "invalid line terminator in command replay file");
+        return REPLAY_PREPARE_ERROR;
+    }
     for (i = 0U; line[i] != '\0'; ++i) {
         unsigned char ch = (unsigned char)line[i];
-        if (ch < 32U || ch > 126U)
-            return stream_vm_error(vm,
-                                   "command replay line contains unsupported non-ASCII input");
+        if (ch < 32U || ch > 126U) {
+            stream_vm_error(vm,
+                            "command replay line contains unsupported non-ASCII input");
+            return REPLAY_PREPARE_ERROR;
+        }
     }
 
     if (zmachine_supply_input(vm, line) != TCL_OK)
-        return TCL_ERROR;
+        return REPLAY_PREPARE_ERROR;
     vm->pending_input_terminator = has_marker ? marker : 13U;
-    return 1;
+    return REPLAY_PREPARE_QUEUED;
 }
 
 /*
@@ -509,10 +536,12 @@ int zmachine_run(ZMachine *vm)
             Tcl_DStringSetLength(&vm->output, 0);
             replayed = 1;
             rc = prepare_replay_input(vm);
-            if (rc == TCL_ERROR)
+            if (rc == REPLAY_PREPARE_ERROR)
                 break;
-            if (rc == 0)
+            if (rc == REPLAY_PREPARE_EOF) {
+                rc = TCL_OK;
                 break;
+            }
             continue;
         }
         break;
