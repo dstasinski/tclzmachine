@@ -69,6 +69,18 @@ static void make_path(char path[L_tmpnam])
     assert(tmpnam(path) != NULL);
 }
 
+static void assert_run_ok(ZMachine *vm, const char *context)
+{
+    int rc = zmachine_run(vm);
+    if (rc != TCL_OK) {
+        fprintf(stderr,
+                "%s: rc=%d state=%d pc=0x%lx error=%s\n",
+                context, rc, (int)vm->state, (unsigned long)vm->pc,
+                vm->error[0] ? vm->error : "(none)");
+    }
+    assert(rc == TCL_OK);
+}
+
 int main(void)
 {
     /* input_stream 1 requests a replay path, then automatically supplies LOOK. */
@@ -91,7 +103,7 @@ int main(void)
         vm.memory[0x28U] = 0xBAU; /* quit */
         vm.memory[0x80U] = 20U;
 
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "initial replay selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
         assert(strcmp(zmachine_pending_stream_request(&vm), "replay") == 0);
         assert(vm.pc == 0x20U);
@@ -99,7 +111,7 @@ int main(void)
         assert(zmachine_stream_file(&vm, "replay", path) == TCL_OK);
         assert(vm.pc == 0x23U);
         assert(zmachine_current_input_stream(&vm) == 1);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "replay execution");
         assert(vm.state == ZM_STATE_HALTED);
         assert(vm.memory[0x81U] == 4U);
         assert(memcmp(vm.memory + 0x82U, "look", 4U) == 0);
@@ -128,16 +140,16 @@ int main(void)
         vm.memory[0x2BU] = 0xBAU;
         vm.memory[0x80U] = 20U;
 
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "transcript selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
         assert(strcmp(zmachine_pending_stream_request(&vm), "transcript") == 0);
         assert(zmachine_stream_file(&vm, "transcript", path) == TCL_OK);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "transcript input wait");
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(strcmp(zmachine_output_data(&vm), "A") == 0);
 
         assert(zmachine_supply_input(&vm, "LOOK") == TCL_OK);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "transcript completion");
         assert(vm.state == ZM_STATE_HALTED);
         read_file(path, contents, sizeof(contents));
         assert(strcmp(contents, "Alook\n") == 0);
@@ -170,18 +182,18 @@ int main(void)
         vm.memory[0x30U] = 0xBAU;
         vm.memory[0x80U] = 20U;
 
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "record selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
         assert(strcmp(zmachine_pending_stream_request(&vm), "record") == 0);
         assert(zmachine_stream_file(&vm, "record", path) == TCL_OK);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "record line wait");
         assert(vm.state == ZM_STATE_WAITING_INPUT);
 
         assert(zmachine_supply_input(&vm, "LOOK") == TCL_OK);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "record character wait");
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(zmachine_supply_key(&vm, 129U) == TCL_OK);
-        assert(zmachine_run(&vm) == TCL_OK);
+        assert_run_ok(&vm, "record completion");
         assert(vm.state == ZM_STATE_HALTED);
 
         read_file(path, contents, sizeof(contents));
