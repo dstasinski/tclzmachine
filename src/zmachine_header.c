@@ -23,7 +23,7 @@
 #include <stddef.h>
 
 #define ZM_HEADER_MINIMUM_SIZE 64U
-#define ZM_INTERPRETER_NUMBER 6U       /* IBM-PC compatibility convention. */
+#define ZM_INTERPRETER_NUMBER 2U       /* Apple IIe: legacy text-safe identity. */
 #define ZM_INTERPRETER_VERSION ((uint8_t)'T')
 #define ZM_SCREEN_HEIGHT_LINES 255U    /* Infinite scrolling text surface. */
 #define ZM_SCREEN_WIDTH_CHARS 80U
@@ -121,8 +121,13 @@ void zmachine_refresh_interpreter_header(ZMachine *vm)
 
     if (vm->version >= 4U) {
         /*
-         * Interpreter number 6 avoids the legacy Macintosh/Amiga code paths
-         * which unconditionally assume Beyond Zork's character-graphics font.
+         * Legacy Version-5 games sometimes branch on the historical interpreter
+         * number instead of using set_font. Apple IIe identity (2) is a useful
+         * text-only compatibility choice: Beyond Zork specifically avoids its
+         * character-graphics font on that interpreter, whereas the MS-DOS path
+         * can emit IBM graphics codes when font 3 is unavailable. The Standard
+         * also notes that many ITF interpreters traditionally use number 2.
+         *
          * Header dimensions model a normal 80-column text device with unlimited
          * vertical scrollback, so the interpreter never needs a [MORE] prompt.
          */
