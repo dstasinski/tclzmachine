@@ -46,8 +46,10 @@ The runtime now contains a working execution core rather than only starter scaff
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
 - dynamically allocated one-level `save_undo` / `restore_undo` state restoration
+- cooperative full-game save/restore with Quetzal FORM IFZS persistence
+- Quetzal UMem writing plus UMem and compressed CMem restore support
 - optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, presentation, and wrapping behavior
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, presentation, and wrapping behavior
 - manual real-story compatibility probes
 
 ### Real-game compatibility reached so far
@@ -76,7 +78,7 @@ package require tclzmachine
 zmachine::create game1 /path/to/zork1.z3
 ```
 
-Send one player command. The call resumes the VM and returns when the story asks for another line of input, halts, or encounters an error:
+Send one player command. The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore filename, halts, or encounters an error:
 
 ```tcl
 set response [zmachine::command game1 "look"]
@@ -86,8 +88,50 @@ puts $response
 Inspect session metadata:
 
 ```tcl
-puts [zmachine::info game1]
+set info [zmachine::info game1]
+puts $info
 ```
+
+`fileRequest` in that dictionary is empty during ordinary play and becomes `save` or `restore` when the story has yielded for host file selection.
+
+### Quetzal save/restore handshake
+
+Filename policy deliberately belongs to Tcl/the embedding application rather than the VM. When a story executes a full-game save or restore opcode, execution yields. The host can choose a path, retry after an I/O error, or decline the request.
+
+Example save handling:
+
+```tcl
+set text [zmachine::command game1 "save"]
+puts $text
+
+set info [zmachine::info game1]
+if {[dict get $info fileRequest] eq "save"} {
+    set more [zmachine::save game1 /path/to/game1.sav]
+    puts $more
+}
+```
+
+Restore works the same way:
+
+```tcl
+set text [zmachine::command game1 "restore"]
+puts $text
+
+if {[dict get [zmachine::info game1] fileRequest] eq "restore"} {
+    set more [zmachine::restore game1 /path/to/game1.sav]
+    puts $more
+}
+```
+
+To tell the story that the player declined the filename request or that the host does not want to retry a failed file operation:
+
+```tcl
+zmachine::cancel game1
+```
+
+A successful save makes the story's save opcode return success. A successful restore transfers execution back to the original save point with the standard restored result. Cancel completes the pending save/restore with its normal failure result.
+
+The generated save file is Quetzal `FORM IFZS`. tclzmachine writes the required `IFhd`, `UMem`, and `Stks` chunks and accepts either `UMem` or standard compressed `CMem` when restoring. Full-game save/restore is implemented; the separate operand-bearing V5+ save/restore forms for auxiliary memory-region files are not yet implemented.
 
 Configure optional output wrapping. The value is a maximum UTF-8 byte count per returned physical line; `0` disables automatic wrapping and is the default:
 
@@ -103,7 +147,7 @@ zmachine::destroy game1
 
 ## IRC-oriented output wrapping
 
-Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command` applies the configured session limit only while returning that text to Tcl.
+Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command` and file-request completion calls apply the configured session limit only while returning that text to Tcl.
 
 The wrapper:
 
@@ -197,7 +241,7 @@ tests/games/
 └── README.md
 ```
 
-The fixture will exercise deterministic text output, input parsing, branches, arithmetic, routine calls, object movement, inventory, properties, state changes, and quit behavior. Official games remain separate real-world compatibility tests.
+The fixture will exercise deterministic text output, input parsing, branches, arithmetic, routine calls, object movement, inventory, properties, state changes, save/restore, and quit behavior. Official games remain separate real-world compatibility tests.
 
 ## Documentation requirement
 
@@ -207,7 +251,7 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 
 1. Continue opcode compatibility work using real story files as probes.
 2. Complete text-oriented handling for remaining safe presentation/status opcodes.
-3. Implement file-based save/restore, with Quetzal-compatible persistence as the preferred target; one-level in-memory undo is already implemented.
+3. Implement the operand-bearing V5+ auxiliary-file forms of `save` / `restore` if needed; full-game Quetzal persistence and in-memory undo are already implemented.
 4. Add the project-owned compiled Z3/Z5 integration game and scripted conversations.
 5. Broaden compatibility testing across representative V1-V5, V7, and V8 stories.
 6. Complete the source/header documentation audit.
@@ -228,10 +272,10 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 A game session remains resident as one native VM instance:
 
 ```text
-IRC/Tcl -> one input line -> VM executes -> next input request -> Tcl string
+IRC/Tcl -> one input line -> VM executes -> next input/file request -> Tcl
 ```
 
-IRC framing, flood control, user ownership, authentication, persistence policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
+IRC framing, flood control, user ownership, authentication, save-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
 
 ## Licensing
 
