@@ -32,11 +32,11 @@ static void write_dictionary(ZMachine *vm,
                              uint16_t address,
                              const uint8_t encoded_word[6])
 {
-    vm->memory[address] = 1U;                  /* one separator */
+    vm->memory[address] = 1U;
     vm->memory[address + 1U] = (uint8_t)',';
-    vm->memory[address + 2U] = 6U;             /* entry width */
+    vm->memory[address + 2U] = 6U;
     vm->memory[address + 3U] = 0U;
-    vm->memory[address + 4U] = 1U;             /* one entry */
+    vm->memory[address + 4U] = 1U;
     memcpy(vm->memory + address + 5U, encoded_word, 6U);
 }
 
@@ -78,16 +78,15 @@ int main(void)
     write_dictionary(&vm, 0x100U, encoded_look);
     write_dictionary(&vm, 0x120U, encoded_mystery);
 
-    /* V5 text buffer: maximum byte, current length byte, then characters. */
     vm.memory[0x40U] = 40U;
     vm.memory[0x41U] = (uint8_t)(sizeof(text) - 1U);
     memcpy(vm.memory + 0x42U, text, sizeof(text) - 1U);
-    vm.memory[0x80U] = 4U;                    /* parse-buffer capacity */
+    vm.memory[0x80U] = 4U;
 
     /* VAR:27 tokenise text parse, using the main dictionary. */
     vm.pc = 0x20U;
     vm.memory[0x20U] = 0xFBU;
-    vm.memory[0x21U] = 0x5FU;                 /* small, small, omitted, omitted */
+    vm.memory[0x21U] = 0x5FU;
     vm.memory[0x22U] = 0x40U;
     vm.memory[0x23U] = 0x80U;
     assert(zmachine_step(&vm) == TCL_OK);
@@ -102,21 +101,21 @@ int main(void)
     assert(vm.memory[0x8CU] == 7U && vm.memory[0x8DU] == 8U);
 
     /*
-     * Re-tokenize through a user dictionary containing only "mystery". With
-     * flag=1, unknown "look" and comma slots must remain byte-for-byte intact,
-     * while the recognized third slot is replaced with the user entry.
+     * Re-tokenize through a user dictionary containing only "mystery". Keep
+     * this synthetic instruction away from header bytes $34/$35, which are the
+     * real V5 custom-alphabet pointer and must remain zero for this part.
      */
     memset(vm.memory + 0x82U, 0xA5, 12U);
-    vm.pc = 0x30U;
-    vm.memory[0x30U] = 0xFBU;
-    vm.memory[0x31U] = 0x51U;                 /* small, small, large, small */
-    vm.memory[0x32U] = 0x40U;
-    vm.memory[0x33U] = 0x80U;
-    vm.memory[0x34U] = 0x01U;
-    vm.memory[0x35U] = 0x20U;
-    vm.memory[0x36U] = 1U;
+    vm.pc = 0xE0U;
+    vm.memory[0xE0U] = 0xFBU;
+    vm.memory[0xE1U] = 0x51U;
+    vm.memory[0xE2U] = 0x40U;
+    vm.memory[0xE3U] = 0x80U;
+    vm.memory[0xE4U] = 0x01U;
+    vm.memory[0xE5U] = 0x20U;
+    vm.memory[0xE6U] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
-    assert(vm.pc == 0x37U);
+    assert(vm.pc == 0xE7U);
 
     assert(vm.memory[0x81U] == 3U);
     assert(vm.memory[0x82U] == 0xA5U && vm.memory[0x83U] == 0xA5U &&
@@ -130,7 +129,7 @@ int main(void)
     memset(vm.memory + 0xA0U, 0, 6U);
     vm.pc = 0x50U;
     vm.memory[0x50U] = 0xFCU;
-    vm.memory[0x51U] = 0x55U;                 /* four small constants */
+    vm.memory[0x51U] = 0x55U;
     vm.memory[0x52U] = 0x42U;
     vm.memory[0x53U] = 4U;
     vm.memory[0x54U] = 0U;
@@ -193,15 +192,10 @@ int main(void)
     assert(vm.pc == 0x7EU);
     assert(memcmp(vm.memory + 0xC0U, encoded_custom_at, 6U) == 0);
 
-    /* Restore default alphabets before testing the tokenise error path. */
     vm.memory[0x34U] = 0U;
     vm.memory[0x35U] = 0U;
 
-    /*
-     * VAR:27 has no read-style “parse zero means skip parsing” convention.
-     * Rejecting it here prevents a silent successful no-op and makes the
-     * malformed destination visible to the embedding application.
-     */
+    /* VAR:27 does not inherit read's special parse=0 convention. */
     vm.pc = 0xD0U;
     vm.state = ZM_STATE_READY;
     vm.error[0] = '\0';
