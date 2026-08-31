@@ -1,11 +1,13 @@
 /*
  * tokenise.c
  *
- * Focused Version 5 regression for VAR:27 `tokenise`.
+ * Focused Version 5 regression for lexical VAR opcodes `tokenise` and
+ * `encode_text`.
  *
  * The test exercises the public instruction path, the main story dictionary,
  * the optional user-dictionary operand, dictionary separators, parse-buffer
- * positions, and the flag which preserves slots for unrecognized words.
+ * positions, the flag which preserves slots for unrecognized words, and direct
+ * six-byte dictionary encoding of an explicit story-memory slice.
  */
 
 #include "tclzmachine.h"
@@ -113,11 +115,24 @@ int main(void)
     assert(word_at(vm.memory, 0x8AU) == user_entry);
     assert(vm.memory[0x8CU] == 7U && vm.memory[0x8DU] == 8U);
 
+    /* VAR:28 encode_text 0x42 4 0 0xA0 must produce the "look" key. */
+    memset(vm.memory + 0xA0U, 0, 6U);
+    vm.pc = 0x50U;
+    vm.memory[0x50U] = 0xFCU;
+    vm.memory[0x51U] = 0x55U;                 /* four small constants */
+    vm.memory[0x52U] = 0x42U;
+    vm.memory[0x53U] = 4U;
+    vm.memory[0x54U] = 0U;
+    vm.memory[0x55U] = 0xA0U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x56U);
+    assert(memcmp(vm.memory + 0xA0U, encoded_look, 6U) == 0);
+
     zmachine_undo_discard(&vm);
     free(vm.memory);
     Tcl_DStringFree(&vm.output);
     Tcl_DStringFree(&vm.pending_input);
 
-    puts("tokenise opcode regression passed");
+    puts("V5 lexical opcode regression passed");
     return 0;
 }
