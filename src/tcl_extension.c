@@ -3,11 +3,11 @@
  *
  * Tcl 8.6 loadable-extension boundary for tclzmachine.
  *
- * This file owns Tcl-visible session names, presentation options, and host file
- * policy. Each session contains one independent ZMachine instance. Ordinary VM
- * execution remains unaware of IRC formatting and filesystem naming; when a
- * story requests either a full-game or auxiliary save/restore, the VM yields
- * and Tcl supplies the actual host path.
+ * This file owns Tcl-visible session names, line/key input, presentation
+ * options, and host file policy. Each session contains one independent ZMachine
+ * instance. Ordinary VM execution remains unaware of IRC formatting and
+ * filesystem naming; when a story requests either a full-game or auxiliary
+ * save/restore, the VM yields and Tcl supplies the actual host path.
  */
 
 #include "tclzmachine.h"
@@ -241,6 +241,50 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
     }
 
     if (zmachine_supply_input(s->vm, Tcl_GetString(objv[2])) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return run_session(interp, s);
+}
+
+/* Tcl command: zmachine::key session zscii -- satisfy a suspended read_char. */
+static int cmd_key(ClientData clientData, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    ExtensionState *state = (ExtensionState *)clientData;
+    Session *s;
+    const char *name;
+    int value;
+
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session zsciiCode");
+        return TCL_ERROR;
+    }
+
+    name = Tcl_GetString(objv[1]);
+    s = find_session(state, name);
+    if (!s) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("unknown session \"%s\"", name));
+        return TCL_ERROR;
+    }
+
+    if (s->vm->state == ZM_STATE_WAITING_SAVE ||
+        s->vm->state == ZM_STATE_WAITING_RESTORE) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s or zmachine::cancel",
+                          name,
+                          s->vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
+        return TCL_ERROR;
+    }
+
+    if (Tcl_GetIntFromObj(interp, objv[2], &value) != TCL_OK)
+        return TCL_ERROR;
+    if (value < 0 || value > 255) {
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("ZSCII key code must be between 0 and 255", -1));
+        return TCL_ERROR;
+    }
+
+    if (zmachine_supply_key(s->vm, (uint16_t)value) != TCL_OK)
         return set_vm_failure(interp, s->vm);
     return run_session(interp, s);
 }
@@ -508,6 +552,8 @@ int Tclzmachine_Init(Tcl_Interp *interp)
                          cmd_create, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::command",
                          cmd_command, state, NULL);
+    Tcl_CreateObjCommand(interp, "::zmachine::key",
+                         cmd_key, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::save",
                          cmd_save, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::restore",
