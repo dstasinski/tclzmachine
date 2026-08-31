@@ -161,8 +161,9 @@ int zmachine_reset(ZMachine *vm);
  */
 void zmachine_refresh_interpreter_header(ZMachine *vm);
 
-/* Queue one command and execute until another input/file request, halt, or error. */
+/* Queue host input for a cooperative read or read_char request. */
 int zmachine_supply_input(ZMachine *vm, const char *line);
+int zmachine_supply_key(ZMachine *vm, uint16_t zscii);
 int zmachine_run(ZMachine *vm);
 
 /* Complete, retry, or decline a cooperative story save/restore request. */
