@@ -259,6 +259,45 @@ static int extra_zscii_unicode(ZMachine *vm,
 }
 
 /*
+ * Convert one Unicode code point back to the selected ZSCII extra-character
+ * table for output stream 3. Printable ASCII is handled by the caller; this
+ * helper searches only ZSCII 155..251. The lookup deliberately uses the same
+ * forward mapping routine as normal ZSCII output so a custom Unicode table can
+ * never disagree between print_char and print_unicode.
+ */
+static int unicode_to_extra_zscii(ZMachine *vm,
+                                  uint16_t codepoint,
+                                  uint8_t *zscii,
+                                  int *defined)
+{
+    uint16_t candidate;
+
+    if (!vm || !zscii || !defined)
+        return TCL_ERROR;
+
+    *defined = 0;
+    *zscii = (uint8_t)'?';
+
+    for (candidate = ZM_ZSCII_EXTRA_FIRST;
+         candidate <= ZM_ZSCII_EXTRA_LAST;
+         ++candidate) {
+        uint16_t unicode;
+        int entry_defined;
+
+        if (extra_zscii_unicode(vm, candidate,
+                                &unicode, &entry_defined) != TCL_OK)
+            return TCL_ERROR;
+        if (entry_defined && unicode == codepoint) {
+            *defined = 1;
+            *zscii = (uint8_t)candidate;
+            return TCL_OK;
+        }
+    }
+
+    return TCL_OK;
+}
+
+/*
  * Emit one ZSCII output character through the currently selected output route.
  *
  * Normal screen/Tcl output maps ZSCII newline to '\n', passes printable ASCII,
@@ -306,6 +345,64 @@ int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii)
         return append_utf8(vm, zscii);
 
     return append_utf8(vm, defined ? unicode : (uint16_t)'?');
+}
+
+/*
+ * Emit one Unicode character for EXT:11 print_unicode.
+ *
+ * Z-machine Unicode is limited to the BMP. Control values and surrogate code
+ * units are not valid output characters. Stream 1 can carry every remaining
+ * BMP scalar value because Tcl's canonical result is UTF-8. Stream 3, however,
+ * is byte-oriented ZSCII: ASCII maps directly, a selected extra-character table
+ * entry is used when available, and otherwise the standard requires '?'.
+ */
+int zmachine_text_output_unicode(ZMachine *vm, uint16_t codepoint)
+{
+    uint8_t zscii = (uint8_t)'?';
+    int defined = 0;
+
+    if (!vm)
+        return TCL_ERROR;
+    if (!unicode_is_printable(codepoint)) {
+        text_error(vm, "invalid Unicode output character");
+        return TCL_ERROR;
+    }
+
+    if (vm->stream3_depth > 0U) {
+        if (codepoint >= 32U && codepoint <= 126U) {
+            zscii = (uint8_t)codepoint;
+        } else if (unicode_to_extra_zscii(vm, codepoint,
+                                          &zscii, &defined) != TCL_OK) {
+            return TCL_ERROR;
+        } else if (!defined) {
+            zscii = (uint8_t)'?';
+        }
+        return append_stream3_zscii(vm, zscii);
+    }
+
+    return append_utf8(vm, codepoint);
+}
+
+/*
+ * Report the exact Unicode capabilities exposed by this frontend.
+ *
+ * UTF-8 output makes every printable BMP scalar value displayable, so bit 0 is
+ * set for all non-control, non-surrogate values. The current cooperative input
+ * implementation writes Tcl command bytes directly into ZSCII buffers and can
+ * therefore promise Unicode keyboard input only for the shared printable ASCII
+ * subset; bit 1 is deliberately conservative until UTF-8 input decoding exists.
+ */
+uint16_t zmachine_text_unicode_capabilities(uint16_t codepoint)
+{
+    uint16_t capabilities = 0U;
+
+    if (!unicode_is_printable(codepoint))
+        return 0U;
+
+    capabilities |= 0x0001U;
+    if (codepoint >= 32U && codepoint <= 126U)
+        capabilities |= 0x0002U;
+    return capabilities;
 }
 
 /*
