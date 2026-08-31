@@ -118,18 +118,20 @@ int main(void)
 
     /*
      * A V5 text buffer whose actual write range crosses static memory is
-     * rejected before byte 1 or any text byte changes.
+     * rejected before byte 1 or any text byte changes. Byte 1 must begin at
+     * zero here so this reaches the base range validator rather than the
+     * preloaded-input consistency check.
      */
     {
         ZMachine vm;
 
         init_vm(&vm, 5U);
-        vm.memory[0x17EU] = 4U;    /* maximum character count */
-        vm.memory[0x17FU] = 0xA5U; /* old count sentinel */
+        vm.memory[0x17EU] = 4U;
+        vm.memory[0x17FU] = 0U;
         queue_input(&vm, "x");
 
         assert(zmachine_input_read_line(&vm, 0x17EU, 0U, NULL) == TCL_ERROR);
-        assert(vm.memory[0x17FU] == 0xA5U);
+        assert(vm.memory[0x17FU] == 0U);
         assert(vm.memory[0x180U] == 0U);
         assert(vm.input_available == 1);
         assert(strcmp(Tcl_DStringValue(&vm.pending_input), "x") == 0);
@@ -146,7 +148,7 @@ int main(void)
 
         init_vm(&vm, 5U);
         vm.memory[0x80U] = 10U;
-        vm.memory[0x81U] = 0xA5U;
+        vm.memory[0x81U] = 0U;
         memcpy(vm.memory + 0x82U, "OLD", 3U);
         vm.memory[0x17DU] = 1U;
         vm.memory[0x17EU] = 0x5AU;
@@ -154,7 +156,7 @@ int main(void)
         queue_input(&vm, "go");
 
         assert(zmachine_input_read_line(&vm, 0x80U, 0x17DU, NULL) == TCL_ERROR);
-        assert(vm.memory[0x81U] == 0xA5U);
+        assert(vm.memory[0x81U] == 0U);
         assert(memcmp(vm.memory + 0x82U, "OLD", 3U) == 0);
         assert(vm.memory[0x17EU] == 0x5AU);
         assert(vm.memory[0x17FU] == 0xCCU);
@@ -169,12 +171,15 @@ int main(void)
 
         init_vm(&vm, 5U);
         vm.memory[0x80U] = 0U;
-        vm.memory[0x81U] = 0x66U;
+        vm.memory[0x81U] = 0U;
+        vm.memory[0x82U] = 0x66U;
         queue_input(&vm, "x");
 
         assert(zmachine_input_read_line(&vm, 0x80U, 0U, NULL) == TCL_ERROR);
-        assert(vm.memory[0x81U] == 0x66U);
+        assert(vm.memory[0x81U] == 0U);
+        assert(vm.memory[0x82U] == 0x66U);
         assert(vm.input_available == 1);
+        assert(strcmp(Tcl_DStringValue(&vm.pending_input), "x") == 0);
         free_vm(&vm);
     }
 
@@ -184,13 +189,15 @@ int main(void)
 
         init_vm(&vm, 5U);
         vm.memory[0x80U] = 8U;
-        vm.memory[0x81U] = 0x44U;
+        vm.memory[0x81U] = 0U;
+        memcpy(vm.memory + 0x82U, "OLD", 3U);
         vm.memory[0xA0U] = 0U;
         vm.memory[0xA1U] = 0x77U;
         queue_input(&vm, "look");
 
         assert(zmachine_input_read_line(&vm, 0x80U, 0xA0U, NULL) == TCL_ERROR);
-        assert(vm.memory[0x81U] == 0x44U);
+        assert(vm.memory[0x81U] == 0U);
+        assert(memcmp(vm.memory + 0x82U, "OLD", 3U) == 0);
         assert(vm.memory[0xA1U] == 0x77U);
         assert(vm.input_available == 1);
         assert(strcmp(Tcl_DStringValue(&vm.pending_input), "look") == 0);
@@ -209,6 +216,7 @@ int main(void)
         assert(zmachine_input_read_line(&vm, 0x80U, 0U, NULL) == TCL_ERROR);
         assert(vm.memory[0x81U] == 0x33U);
         assert(vm.input_available == 1);
+        assert(strcmp(Tcl_DStringValue(&vm.pending_input), "x") == 0);
         free_vm(&vm);
     }
 
