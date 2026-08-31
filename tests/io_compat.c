@@ -1,11 +1,13 @@
 /*
  * io_compat.c
  *
- * Regression coverage for Z-machine input_stream selection and unavailable
- * sound compatibility. Stream 0 selects interactive host input immediately;
- * selecting stream 1 without a configured replay file yields cooperatively so
- * Tcl can choose the command-file path. Sound remains intentionally absent from
- * this text-only interpreter, but its operands still have normal VM effects.
+ * Regression coverage for Z-machine input/output stream selection and
+ * unavailable sound compatibility. Stream 0 selects interactive host input
+ * immediately; selecting stream 1 without a configured replay file yields
+ * cooperatively so Tcl can choose the command-file path. Output-stream operands
+ * retain ordinary variable/stack side effects exactly once. Sound remains
+ * intentionally absent from this text-only interpreter, but its operands still
+ * have normal VM effects.
  */
 
 #include "tclzmachine.h"
@@ -93,6 +95,29 @@ int main(void)
         Tcl_DStringFree(&vm.pending_input);
     }
 
+    /*
+     * A variable-0 output_stream operand pops exactly once. This specifically
+     * guards the host-stream wrapper from resolving an operand merely to inspect
+     * its value and then delegating it to a lower handler which resolves again.
+     */
+    {
+        ZMachine vm;
+
+        init_vm(&vm);
+        vm.output_stream1_enabled = 1;
+        assert(zmachine_stack_push(&vm, 0xFFFFU) == TCL_OK); /* stream -1 */
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xF3U; /* VAR:19 output_stream */
+        vm.memory[0x21U] = 0xBFU; /* variable operand, then omitted */
+        vm.memory[0x22U] = 0U;    /* variable 0 / stack */
+
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x23U);
+        assert(vm.sp == 0U);
+        assert(vm.output_stream1_enabled == 0);
+        free_vm(&vm);
+    }
+
     /* Historical zero-operand sound_effect is harmless even without sound. */
     {
         ZMachine vm;
@@ -124,6 +149,6 @@ int main(void)
         free_vm(&vm);
     }
 
-    puts("embedded input/sound compatibility tests passed");
+    puts("embedded input/output/sound compatibility tests passed");
     return 0;
 }
