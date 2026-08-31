@@ -2,7 +2,7 @@
 #
 # Tcl-facing package smoke test. Besides verifying that the shared library
 # loads, this script creates tiny synthetic V3/V5 sessions and exercises the
-# presentation configuration plus cooperative line/key input metadata used by
+# presentation configuration plus cooperative input/host-stream metadata used by
 # embedding applications. No external game fixture is needed here.
 
 if {$argc != 1} {
@@ -16,11 +16,14 @@ if {[package present tclzmachine] ne "0.2.0"} {
     error "unexpected package version"
 }
 
-# `zmachine::key` is the explicit numeric ZSCII companion to line-oriented
-# `zmachine::command`. Behavioral read_char coverage also lives in the C suite;
-# this assertion catches an extension build which forgot to register the Tcl API.
+# Explicit line/key input and host-file streams are distinct Tcl APIs. These
+# assertions catch a shared-library build which omitted either command even when
+# lower-level C regressions still link successfully.
 if {[namespace which ::zmachine::key] eq ""} {
     error "zmachine::key command was not registered"
+}
+if {[namespace which ::zmachine::streamfile] eq ""} {
+    error "zmachine::streamfile command was not registered"
 }
 
 # Build a minimal 128-byte V3 story image. The VM's loader validates the
@@ -66,6 +69,18 @@ try {
 
     if {[zmachine::configure smoke -wordwrap 0] != 0} {
         error "unable to disable word wrapping"
+    }
+
+    set info [zmachine::info smoke]
+    foreach key {streamRequest inputStream commandRecording} {
+        if {![dict exists $info $key]} {
+            error "zmachine::info is missing stream metadata key $key"
+        }
+    }
+    if {[dict get $info streamRequest] ne "" ||
+        [dict get $info inputStream] != 0 ||
+        [dict get $info commandRecording]} {
+        error "unexpected default external stream state: $info"
     }
 
     zmachine::destroy smoke
@@ -129,4 +144,4 @@ try {
     file delete -force $input_story_path
 }
 
-puts "tclzmachine package, configuration, and input metadata APIs loaded successfully"
+puts "tclzmachine package, configuration, input, and stream metadata APIs loaded successfully"
