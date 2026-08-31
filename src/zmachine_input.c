@@ -57,12 +57,7 @@ static int dynamic_range_writable(const ZMachine *vm,
     return length <= limit - start;
 }
 
-/*
- * Write one byte to story dynamic memory.
- *
- * Z-machine input buffers and parse buffers are writable story structures, so
- * writes at or beyond the static-memory boundary must be rejected.
- */
+/* Write one byte to story dynamic memory. */
 static int write_byte(ZMachine *vm, uint32_t addr, uint8_t value)
 {
     if (!dynamic_range_writable(vm, addr, 1U))
@@ -74,10 +69,7 @@ static int write_byte(ZMachine *vm, uint32_t addr, uint8_t value)
 
 /*
  * Write one big-endian word atomically with respect to bounds validation.
- *
- * Validate both destination bytes before changing either one. The previous
- * byte-at-a-time implementation could modify the high byte and only then learn
- * that the low byte crossed into static or unmapped memory.
+ * Validate both destination bytes before changing either one.
  */
 static int write_word(ZMachine *vm, uint32_t addr, uint16_t value)
 {
@@ -90,15 +82,48 @@ static int write_word(ZMachine *vm, uint32_t addr, uint16_t value)
 }
 
 /*
- * Map one lower-case input character to the default Z-machine alphabets.
+ * Resolve the optional V5+ story-specific alphabet table.
  *
- * Return 0 for alphabet A0, 2 for A2, or -1 when the character must be encoded
- * as a 10-bit ZSCII escape. Input is lowercased before this helper is called,
- * so A1 is not needed for ordinary dictionary matching.
+ * Header word $34 is zero for the default alphabets or a byte address of 78
+ * ZSCII bytes (26 per alphabet). A malformed nonzero table is an input-encoding
+ * error: silently falling back to the defaults would make typed words compare
+ * against a different encoding from the story's dictionary.
  */
-static int alphabet_index(unsigned char c, uint8_t *zchar)
+static int custom_alphabet_address(const ZMachine *vm, uint16_t *address)
 {
-    static const char a2[] = " ^0123456789.,!?_#'\"/\\-:()";
+    uint16_t table;
+
+    if (!vm || !vm->memory || !address)
+        return TCL_ERROR;
+
+    *address = 0U;
+    if (vm->version < 5U)
+        return TCL_OK;
+    if (vm->memory_size <= 0x35U)
+        return TCL_ERROR;
+
+    table = be16(vm->memory + 0x34U);
+    if (table == 0U)
+        return TCL_OK;
+    if ((size_t)table + 78U > vm->memory_size)
+        return TCL_ERROR;
+
+    *address = table;
+    return TCL_OK;
+}
+
+/*
+ * Find one lower-case ZSCII byte in the version's default alphabet table.
+ *
+ * A0 contains lower-case letters. A1 is not normally needed because dictionary
+ * input is lowercased. A2 differs in V1: with no newline entry, digit zero begins
+ * at Z-character 7; in V2+ digit zero begins at Z-character 8 because A2/7 is
+ * newline. A2/6 is always the 10-bit ZSCII escape and is never a table glyph.
+ */
+static int default_alphabet_index(uint8_t version,
+                                  unsigned char c,
+                                  uint8_t *zchar)
+{
     const char *p;
 
     if (c >= 'a' && c <= 'z') {
@@ -106,70 +131,192 @@ static int alphabet_index(unsigned char c, uint8_t *zchar)
         return 0;
     }
 
-    p = strchr(a2, (int)c);
-    if (p && p >= a2 + 2) {
-        *zchar = (uint8_t)(6U + (p - (a2 + 2)));
-        return 2;
+    if (version == 1U) {
+        static const char a2_v1[] = "0123456789.,!?_#'\"/\\<-:()";
+        p = strchr(a2_v1, (int)c);
+        if (p) {
+            *zchar = (uint8_t)(7U + (p - a2_v1));
+            return 2;
+        }
+    } else {
+        static const char a2_v2plus[] = "0123456789.,!?_#'\"/\\-:()";
+        p = strchr(a2_v2plus, (int)c);
+        if (p) {
+            *zchar = (uint8_t)(8U + (p - a2_v2plus));
+            return 2;
+        }
     }
 
     return -1;
 }
 
 /*
+ * Find one ZSCII byte in the active story alphabet table.
+ *
+ * Custom tables exist only in V5+. Search A0 first so a directly representable
+ * character gets the shortest encoding, then A1 and A2. Entries 6 and 7 of A2
+ * remain the escape and newline controls even when bytes are present in those
+ * two table positions, so they are deliberately skipped during lookup.
+ */
+static int alphabet_index(const ZMachine *vm,
+                          uint16_t custom_table,
+                          unsigned char c,
+                          uint8_t *zchar)
+{
+    int alphabet;
+
+    if (custom_table == 0U)
+        return default_alphabet_index(vm->version, c, zchar);
+
+    for (alphabet = 0; alphabet < 3; ++alphabet) {
+        unsigned first = alphabet == 2 ? 2U : 0U;
+        unsigned i;
+
+        for (i = first; i < 26U; ++i) {
+            size_t address = (size_t)custom_table +
+                             (size_t)alphabet * 26U + i;
+            if (vm->memory[address] == c) {
+                *zchar = (uint8_t)(6U + i);
+                return alphabet;
+            }
+        }
+    }
+
+    return -1;
+}
+
+/* Append as much of a Z-character construction as the fixed key still holds. */
+static void append_zchars(uint8_t *zchars,
+                          size_t zmax,
+                          size_t *used,
+                          const uint8_t *sequence,
+                          size_t sequence_length)
+{
+    size_t i;
+
+    for (i = 0U; i < sequence_length && *used < zmax; ++i)
+        zchars[(*used)++] = sequence[i];
+}
+
+/* Return the V1/V2 temporary or locking shift from one alphabet to another. */
+static uint8_t v12_shift_code(int current, int target, int lock)
+{
+    int delta = (target - current + 3) % 3;
+    uint8_t code = delta == 1 ? 2U : 3U;
+    return lock ? (uint8_t)(code + 2U) : code;
+}
+
+/*
  * Encode bytes into the fixed-width dictionary key format.
  *
- * V1-V3 dictionaries compare the first 6 Z-characters, stored in two words
- * (4 bytes). V4+ compare 9 Z-characters in three words (6 bytes). Unused
- * positions are padded with Z-character 5, and the high bit of the final word
- * marks the end of the encoded string. An explicit source length is used so
- * encode_text can process a non-NUL-terminated story-memory slice exactly.
+ * V1-V3 dictionaries compare six Z-characters (four bytes); V4+ compare nine
+ * Z-characters (six bytes). Typed text is lowercased, abbreviations are never
+ * used, padding is Z-character 5, and an incomplete shift/escape construction
+ * is retained if the fixed dictionary resolution cuts it off.
+ *
+ * V5+ custom alphabet tables are honored for dictionary encryption just as they
+ * are for text decoding. In V1/V2 the persistent alphabet state is tracked so
+ * the required shift-lock optimization is used when the current and following
+ * input characters both belong to the same non-current alphabet.
  */
-static void encode_dictionary_word(uint8_t version,
-                                   const uint8_t *word,
-                                   size_t word_len,
-                                   uint8_t *out,
-                                   size_t out_len)
+static int encode_dictionary_word(const ZMachine *vm,
+                                  const uint8_t *word,
+                                  size_t word_len,
+                                  uint8_t *out,
+                                  size_t out_len)
 {
     uint8_t zchars[9];
-    size_t zmax = version <= 3 ? 6U : 9U;
-    size_t zi = 0U, i;
-    uint16_t words[3] = {0, 0, 0};
+    size_t zmax;
+    size_t zi = 0U;
+    size_t i;
+    uint16_t custom_table;
+    int current_alphabet = 0;
+
+    if (!vm || !word || !out)
+        return TCL_ERROR;
+
+    zmax = vm->version <= 3U ? 6U : 9U;
+    if (out_len < (zmax / 3U) * 2U)
+        return TCL_ERROR;
+    if (custom_alphabet_address(vm, &custom_table) != TCL_OK)
+        return TCL_ERROR;
 
     memset(zchars, 5, sizeof(zchars));
 
     for (i = 0U; i < word_len && zi < zmax; ++i) {
-        unsigned char c = (unsigned char)tolower(word[i]);
-        uint8_t z;
-        int alphabet = alphabet_index(c, &z);
+        unsigned char c = (unsigned char)tolower((unsigned char)word[i]);
+        uint8_t zchar = 0U;
+        int alphabet;
+        uint8_t sequence[4];
+        size_t sequence_length = 0U;
 
-        if (alphabet == 0) {
-            zchars[zi++] = z;
-        } else if (alphabet == 2 && zi + 1U < zmax) {
-            /* Shift into A2 for one character. */
-            zchars[zi++] = (version <= 2) ? 3U : 5U;
-            zchars[zi++] = z;
-        } else if (zi + 3U < zmax) {
-            /* A2 Z-character 6 introduces a 10-bit ZSCII literal. */
-            zchars[zi++] = (version <= 2) ? 3U : 5U;
-            zchars[zi++] = 6U;
-            zchars[zi++] = (uint8_t)((c >> 5) & 0x1fU);
-            zchars[zi++] = (uint8_t)(c & 0x1fU);
+        /* Z-character 0 represents space independently of the alphabet table. */
+        if (c == (unsigned char)' ') {
+            sequence[sequence_length++] = 0U;
+            append_zchars(zchars, zmax, &zi, sequence, sequence_length);
+            continue;
         }
+
+        alphabet = alphabet_index(vm, custom_table, c, &zchar);
+
+        if (vm->version <= 2U && alphabet >= 0) {
+            if (alphabet != current_alphabet) {
+                int lock = 0;
+
+                if (i + 1U < word_len) {
+                    unsigned char next =
+                        (unsigned char)tolower((unsigned char)word[i + 1U]);
+                    uint8_t next_zchar;
+                    int next_alphabet = next == (unsigned char)' ' ? -1 :
+                        alphabet_index(vm, custom_table, next, &next_zchar);
+                    if (next_alphabet == alphabet)
+                        lock = 1;
+                }
+
+                sequence[sequence_length++] =
+                    v12_shift_code(current_alphabet, alphabet, lock);
+                if (lock)
+                    current_alphabet = alphabet;
+            }
+            sequence[sequence_length++] = zchar;
+        } else if (vm->version <= 2U && alphabet < 0) {
+            if (current_alphabet != 2)
+                sequence[sequence_length++] =
+                    v12_shift_code(current_alphabet, 2, 0);
+            sequence[sequence_length++] = 6U;
+            sequence[sequence_length++] = (uint8_t)((c >> 5) & 0x1fU);
+            sequence[sequence_length++] = (uint8_t)(c & 0x1fU);
+        } else if (alphabet == 0) {
+            sequence[sequence_length++] = zchar;
+        } else if (alphabet == 1) {
+            sequence[sequence_length++] = 4U;
+            sequence[sequence_length++] = zchar;
+        } else if (alphabet == 2) {
+            sequence[sequence_length++] = 5U;
+            sequence[sequence_length++] = zchar;
+        } else {
+            sequence[sequence_length++] = 5U;
+            sequence[sequence_length++] = 6U;
+            sequence[sequence_length++] = (uint8_t)((c >> 5) & 0x1fU);
+            sequence[sequence_length++] = (uint8_t)(c & 0x1fU);
+        }
+
+        append_zchars(zchars, zmax, &zi, sequence, sequence_length);
     }
 
     for (i = 0U; i < zmax / 3U; ++i) {
-        words[i] = (uint16_t)(((uint16_t)zchars[i * 3U] << 10) |
-                              ((uint16_t)zchars[i * 3U + 1U] << 5) |
-                              zchars[i * 3U + 2U]);
+        uint16_t packed =
+            (uint16_t)(((uint16_t)zchars[i * 3U] << 10) |
+                       ((uint16_t)zchars[i * 3U + 1U] << 5) |
+                       zchars[i * 3U + 2U]);
         if (i == zmax / 3U - 1U)
-            words[i] |= 0x8000U;
+            packed |= 0x8000U;
 
-        out[i * 2U] = (uint8_t)(words[i] >> 8);
-        out[i * 2U + 1U] = (uint8_t)words[i];
+        out[i * 2U] = (uint8_t)(packed >> 8);
+        out[i * 2U + 1U] = (uint8_t)packed;
     }
 
-    /* out_len documents the caller's buffer contract for future expansion. */
-    (void)out_len;
+    return TCL_OK;
 }
 
 /*
@@ -180,13 +327,15 @@ static void encode_dictionary_word(uint8_t version,
  * valid for both sorted and unsorted dictionaries and is especially useful for
  * `tokenise`, whose optional user dictionary may be modified during play.
  *
- * Return the dictionary entry address on success or zero when the token is not
- * present. A zero address is the value required in the parse buffer for an
- * unrecognized word.
+ * Malformed dictionary layout is treated as an empty/not-matching dictionary,
+ * preserving historical tolerance. A malformed custom alphabet table is
+ * different: it makes encryption itself undefined, so that error is propagated
+ * to the caller instead of silently using the wrong key.
  */
-static uint16_t dictionary_lookup(const ZMachine *vm,
-                                  uint16_t dictionary_addr,
-                                  const char *word)
+static int dictionary_lookup(const ZMachine *vm,
+                             uint16_t dictionary_addr,
+                             const char *word,
+                             uint16_t *result)
 {
     uint32_t d = dictionary_addr;
     uint8_t separators, entry_len;
@@ -196,15 +345,19 @@ static uint16_t dictionary_lookup(const ZMachine *vm,
     size_t key_len = vm->version <= 3 ? 4U : 6U;
     int i;
 
+    if (!result)
+        return TCL_ERROR;
+    *result = 0U;
+
     if (!vm->memory || d == 0U || d >= vm->memory_size)
-        return 0U;
+        return TCL_OK;
 
     separators = vm->memory[d++];
     if ((size_t)d + separators > vm->memory_size)
-        return 0U;
+        return TCL_OK;
     d += separators;
     if ((size_t)d + 3U > vm->memory_size)
-        return 0U;
+        return TCL_OK;
 
     entry_len = vm->memory[d++];
     entry_count = (int16_t)be16(vm->memory + d);
@@ -214,12 +367,13 @@ static uint16_t dictionary_lookup(const ZMachine *vm,
     if (entry_count < 0)
         entry_count = -entry_count;
     if ((size_t)entry_len < key_len)
-        return 0U;
+        return TCL_OK;
 
     memset(encoded, 0, sizeof(encoded));
-    encode_dictionary_word(vm->version,
-                           (const uint8_t *)word, strlen(word),
-                           encoded, key_len);
+    if (encode_dictionary_word(vm,
+                               (const uint8_t *)word, strlen(word),
+                               encoded, key_len) != TCL_OK)
+        return TCL_ERROR;
 
     for (i = 0; i < entry_count; ++i) {
         uint32_t addr = entries + (uint32_t)i * entry_len;
@@ -227,14 +381,14 @@ static uint16_t dictionary_lookup(const ZMachine *vm,
         if ((size_t)addr + key_len > vm->memory_size)
             break;
         if (memcmp(vm->memory + addr, encoded, key_len) == 0) {
-            /* Parse-buffer dictionary addresses are 16-bit by definition. */
             if (addr > 0xffffU)
-                return 0U;
-            return (uint16_t)addr;
+                return TCL_OK;
+            *result = (uint16_t)addr;
+            return TCL_OK;
         }
     }
 
-    return 0U;
+    return TCL_OK;
 }
 
 /* Return nonzero when c is one of the selected dictionary's separators. */
@@ -296,15 +450,7 @@ static size_t count_parse_tokens(const ZMachine *vm,
     return count;
 }
 
-/*
- * Validate a parse buffer before any text or parse-buffer mutation occurs.
- *
- * A nonzero parse buffer must be capable of holding at least one standard
- * four-byte entry plus its two-byte header (six bytes total), matching the
- * Standard's requested malformed-buffer diagnostic. For the current line we
- * additionally prove that every slot which tokenization can actually write is
- * entirely inside dynamic memory.
- */
+/* Validate a parse buffer before any text or parse-buffer mutation occurs. */
 static int validate_parse_buffer(const ZMachine *vm,
                                  uint16_t parse_buffer,
                                  const char *line,
@@ -345,7 +491,6 @@ static int validate_parse_buffer(const ZMachine *vm,
  *
  * When preserve_unrecognized is true, an unknown word leaves all four bytes of
  * its existing parse slot untouched while still incrementing the token count.
- * This is the special flag behavior of the V5+ `tokenise` opcode.
  */
 static int tokenize(ZMachine *vm,
                     uint16_t parse_buffer,
@@ -358,7 +503,6 @@ static int tokenize(ZMachine *vm,
     uint8_t max_words, count = 0U;
     size_t i = 0U;
 
-    /* A zero parse-buffer address is harmless for read's optional parse arg. */
     if (parse_buffer == 0U)
         return TCL_OK;
 
@@ -397,7 +541,9 @@ static int tokenize(ZMachine *vm,
         token[key_len] = '\0';
         token_len = i - start;
 
-        dict_addr = dictionary_lookup(vm, dictionary_addr, token);
+        if (dictionary_lookup(vm, dictionary_addr, token,
+                              &dict_addr) != TCL_OK)
+            return TCL_ERROR;
         entry_addr = (uint32_t)parse_buffer + 2U +
                      (uint32_t)count * 4U;
 
@@ -437,38 +583,35 @@ int zmachine_input_read_line(ZMachine *vm,
     size_t len, i, max_chars;
     size_t text_required;
     uint8_t offset;
+    uint16_t custom_table;
 
     if (!vm || !vm->memory || !vm->input_available)
         return TCL_ERROR;
     if (!dynamic_range_writable(vm, text_buffer, 1U))
         return TCL_ERROR;
+    if (custom_alphabet_address(vm, &custom_table) != TCL_OK)
+        return TCL_ERROR;
+    (void)custom_table; /* Validation only; lookup repeats it while encoding. */
 
     line = Tcl_DStringValue(&vm->pending_input);
     len = (size_t)Tcl_DStringLength(&vm->pending_input);
     max_chars = vm->memory[text_buffer];
 
     if (vm->version <= 4U) {
-        /*
-         * Byte 0=n implies an n+1-byte physical buffer and room for at most
-         * n-1 typed characters plus the terminating zero. n<2 therefore means
-         * the described buffer is shorter than the Standard's three-byte
-         * minimum and is treated as malformed.
-         */
         if (max_chars < 2U)
             return TCL_ERROR;
         --max_chars;
         offset = 1U;
         if (len > max_chars)
             len = max_chars;
-        text_required = 2U + len; /* size byte + text + zero terminator */
+        text_required = 2U + len;
     } else {
-        /* V5+ needs byte 0, byte 1 count, and at least one text byte of space. */
         if (max_chars < 1U)
             return TCL_ERROR;
         offset = 2U;
         if (len > max_chars)
             len = max_chars;
-        text_required = 2U + len; /* size byte + count byte + actual text */
+        text_required = 2U + len;
     }
 
     if (text_required < 3U)
@@ -476,7 +619,6 @@ int zmachine_input_read_line(ZMachine *vm,
     if (!dynamic_range_writable(vm, text_buffer, text_required))
         return TCL_ERROR;
 
-    /* Validate parse capacity before changing the text buffer at all. */
     if (validate_parse_buffer(vm, parse_buffer, line, len,
                               vm->dictionary_addr) != TCL_OK)
         return TCL_ERROR;
@@ -505,23 +647,16 @@ int zmachine_input_read_line(ZMachine *vm,
                  vm->dictionary_addr, 0) != TCL_OK)
         return TCL_ERROR;
 
-    /* Input has been committed to story memory and can now be discarded. */
     Tcl_DStringSetLength(&vm->pending_input, 0);
     vm->input_available = 0;
 
     if (terminator)
-        *terminator = 13U; /* ZSCII carriage return / Enter key. */
+        *terminator = 13U;
 
     return TCL_OK;
 }
 
-/*
- * Tokenize text which is already stored in a Version 5+ text buffer.
- *
- * Unlike zmachine_input_read_line(), this routine does not touch pending Tcl
- * input. It reads the byte-1 character count and analyzes bytes beginning at
- * byte 2 exactly where V5+ line input stores them.
- */
+/* Tokenize text already stored in a Version 5+ text buffer. */
 int zmachine_input_tokenize_buffer(ZMachine *vm,
                                    uint16_t text_buffer,
                                    uint16_t parse_buffer,
@@ -529,6 +664,7 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
                                    int preserve_unrecognized)
 {
     uint16_t dictionary_addr;
+    uint16_t custom_table;
     size_t len;
     uint32_t text_start;
 
@@ -536,6 +672,9 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
         return TCL_ERROR;
     if ((size_t)text_buffer + 1U >= vm->memory_size)
         return TCL_ERROR;
+    if (custom_alphabet_address(vm, &custom_table) != TCL_OK)
+        return TCL_ERROR;
+    (void)custom_table;
 
     len = vm->memory[(uint32_t)text_buffer + 1U];
     text_start = (uint32_t)text_buffer + 2U;
@@ -569,8 +708,9 @@ int zmachine_input_encode_text(ZMachine *vm,
     if (!dynamic_range_writable(vm, coded_text, sizeof(encoded)))
         return TCL_ERROR;
 
-    encode_dictionary_word(vm->version, vm->memory + source, length,
-                           encoded, sizeof(encoded));
+    if (encode_dictionary_word(vm, vm->memory + source, length,
+                               encoded, sizeof(encoded)) != TCL_OK)
+        return TCL_ERROR;
     for (i = 0U; i < sizeof(encoded); ++i) {
         if (write_byte(vm, (uint32_t)coded_text + (uint32_t)i,
                        encoded[i]) != TCL_OK)
