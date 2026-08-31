@@ -334,6 +334,7 @@ int zmachine_reset(ZMachine *vm)
     memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
     Tcl_DStringSetLength(&vm->output, 0);
     Tcl_DStringSetLength(&vm->pending_input, 0);
+    zmachine_refresh_interpreter_header(vm);
     return TCL_OK;
 }
 
@@ -475,6 +476,7 @@ static int handle_core_opcode(ZMachine *vm, int *handled)
             vm->stream3_depth = 0U;
             memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
             Tcl_DStringSetLength(&vm->pending_input, 0);
+            zmachine_refresh_interpreter_header(vm);
             return TCL_OK;
         }
 
