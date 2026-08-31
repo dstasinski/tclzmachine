@@ -19,7 +19,7 @@ The intended VM compatibility target is:
 | V7 | Supported |
 | V8 | Supported |
 
-V6 is excluded because its presentation model is unusually screen-oriented and does not fit the project's IRC/text-only purpose. V7 and V8 are retained because their VM model is useful for later, larger text-oriented Z-code games while remaining practical for a text-only frontend.
+V6 is excluded because its presentation model is unusually screen-oriented and does not fit the project's IRC/text-only purpose. V7 and V8 are retained because their VM model follows the V5 text-oriented model while extending address/file-size rules useful for larger Z-code games.
 
 The interpreter does not expose graphics, cursor positioning, mouse input, sound, fonts, colors, menus, or rich terminal layout. Where a supported story uses presentation opcodes that can safely degrade to plain text, the runtime should preserve meaningful textual output and discard presentation details.
 
@@ -37,19 +37,21 @@ The runtime now contains a working execution core rather than only starter scaff
 - per-session story memory, program counter, evaluation stack, call frames, random state, input, and output
 - instruction decoding for LONG, SHORT, VARIABLE, and V5+ EXTENDED forms
 - variable, local, global, stack, store, branch, and indirect-variable semantics
-- routine calls and returns
-- arithmetic, logical, memory, control-flow, object, attribute, and property opcodes used by current compatibility tests
+- routine calls and returns, including V5+ `catch` / `throw`
+- arithmetic, logical, shift, memory, control-flow, object, attribute, and property opcodes used by current compatibility tests
 - Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
 - standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
-- cooperative `read` and `read_char` suspension/resumption
+- cooperative `read` and `read_char` suspension/resumption, including V5+ preloaded line-input buffers
 - dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
+- form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
 - text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
 - dynamically allocated one-level `save_undo` / `restore_undo` state restoration
 - cooperative full-game save/restore with Quetzal FORM IFZS persistence
+- V5+ operand-bearing auxiliary save/restore byte-region files
 - Quetzal UMem writing plus UMem and compressed CMem restore support
 - optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, presentation, tokenization, wrapping, and operand-side-effect behavior
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, auxiliary files, presentation, tokenization, wrapping, and operand-side-effect behavior
 - repository-owned V3 and V5 end-to-end Tcl integration stories, including full-game save/restore
 - manual real-story compatibility probes
 
@@ -93,11 +95,20 @@ set info [zmachine::info game1]
 puts $info
 ```
 
-`fileRequest` in that dictionary is empty during ordinary play and becomes `save` or `restore` when the story has yielded for host file selection.
+`fileRequest` in that dictionary is empty during ordinary play and becomes `save` or `restore` when the story has yielded for host file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
 
-### Quetzal save/restore handshake
+For auxiliary requests, the same dictionary also exposes:
 
-Filename policy deliberately belongs to Tcl/the embedding application rather than the VM. When a story executes a full-game save or restore opcode, execution yields. The host can choose a path, retry after an I/O error, or decline the request.
+- `suggestedFileName` - the story's filename normalized to uppercase 8.3-style form, with `.AUX` added when no extension was supplied
+- `filePrompt` - `-1` when the optional prompt operand was omitted, `0` when the story requests silent filename use, or `1` when it requests confirmation
+- `fileTable` - the story-memory address of the byte region
+- `fileBytes` - the requested maximum byte count
+
+The embedding application remains responsible for translating the suggestion into an actual safe host path.
+
+### Save/restore handshake
+
+Filename policy deliberately belongs to Tcl/the embedding application rather than the VM. When a story executes a full-game or auxiliary save/restore opcode, execution yields. The host can choose a path, retry after an I/O error, or decline the request.
 
 Example save handling:
 
@@ -107,7 +118,10 @@ puts $text
 
 set info [zmachine::info game1]
 if {[dict get $info fileRequest] eq "save"} {
-    set more [zmachine::save game1 /path/to/game1.sav]
+    if {[dict get $info fileRequestKind] eq "auxiliary"} {
+        puts "Story suggested: [dict get $info suggestedFileName]"
+    }
+    set more [zmachine::save game1 /path/chosen/by/the/host]
     puts $more
 }
 ```
@@ -119,7 +133,7 @@ set text [zmachine::command game1 "restore"]
 puts $text
 
 if {[dict get [zmachine::info game1] fileRequest] eq "restore"} {
-    set more [zmachine::restore game1 /path/to/game1.sav]
+    set more [zmachine::restore game1 /path/chosen/by/the/host]
     puts $more
 }
 ```
@@ -130,9 +144,9 @@ To tell the story that the player declined the filename request or that the host
 zmachine::cancel game1
 ```
 
-A successful save makes the story's save opcode return success. A successful restore transfers execution back to the original save point with the version-appropriate restored result or branch behavior. Cancel completes the pending save/restore with its normal failure result.
+For a full-game request, a successful save makes the story's save opcode return success, while a successful restore transfers execution back to the original save point with the version-appropriate restored result or branch behavior. Full-game files use Quetzal `FORM IFZS`; tclzmachine writes the required `IFhd`, `UMem`, and `Stks` chunks and accepts either `UMem` or standard compressed `CMem` when restoring.
 
-The generated save file is Quetzal `FORM IFZS`. tclzmachine writes the required `IFhd`, `UMem`, and `Stks` chunks and accepts either `UMem` or standard compressed `CMem` when restoring. Full-game save/restore is implemented; the separate operand-bearing V5+ save/restore forms for auxiliary memory-region files are not yet implemented.
+For a V5+ auxiliary request, `zmachine::save` writes exactly the requested story-memory bytes and stores `1` on success. `zmachine::restore` reads at most the requested byte count into dynamic memory and stores the number of bytes actually loaded; a missing auxiliary file stores `0`. Auxiliary files are not part of the saved state of play. Cancel stores the normal failure result `0` for an auxiliary request.
 
 Configure optional output wrapping. The value is a maximum UTF-8 byte count per returned physical line; `0` disables automatic wrapping and is the default:
 
@@ -255,11 +269,10 @@ All project `.c` and `.h` files are expected to be fully commented for the 1.0 r
 
 1. Continue systematic opcode compatibility work using real story files and focused project-owned fixtures as probes.
 2. Complete text-oriented handling for remaining safe presentation/status opcodes.
-3. Implement the operand-bearing V5+ auxiliary-file forms of `save` / `restore` if needed; full-game Quetzal persistence and in-memory undo are already implemented.
-4. Broaden owned integration/compatibility coverage for V1, V2, V4, V7, and V8 where targeted fixtures add useful signal.
-5. Complete the source/header documentation audit, including implementation and test sources required by the 1.0 documentation standard.
-6. Harden malformed-story bounds checking, error diagnostics, and Tcl/API documentation.
-7. Run a final standards-oriented release audit beyond the current 33-story startup smoke catalog.
+3. Broaden owned integration/compatibility coverage for V1, V2, V4, V7, and V8 where targeted fixtures add useful signal.
+4. Complete the source/header documentation audit, including implementation and test sources required by the 1.0 documentation standard.
+5. Harden malformed-story bounds checking, error diagnostics, and Tcl/API documentation.
+6. Run a final standards-oriented release audit beyond the current 33-story startup smoke catalog.
 
 ## Version-dependent rules
 
