@@ -183,6 +183,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(io-compat-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME embedded-io-compat COMMAND io-compat-test)
 
+    add_executable(stream-io-test tests/stream_io.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(stream-io-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(stream-io-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME external-stream-io COMMAND stream-io-test)
+
     add_executable(file-aux-test tests/file_aux.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(file-aux-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(file-aux-test PRIVATE ${TCL_LIBRARY})
