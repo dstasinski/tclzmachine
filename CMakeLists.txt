@@ -151,11 +151,16 @@ if(TCLZMACHINE_BUILD_TESTS)
              COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl
                      $<TARGET_FILE:tclzmachine>)
 
-    # Run the committed project-owned story as a true Tcl/API integration test.
-    # The binary is checked into the repository, so this test does not require
-    # an Inform compiler or library on ordinary developer machines.
+    # Run both committed project-owned stories as true Tcl/API integration
+    # tests. The binaries are checked into the repository, so these tests do not
+    # require Inform or an Inform library on ordinary developer machines.
     add_test(NAME repository-story-integration
              COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.tcl
                      $<TARGET_FILE:tclzmachine>
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/games/compiled/tclzmachine-test.z5)
+
+    add_test(NAME repository-story-v3-integration
+             COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_v3.tcl
+                     $<TARGET_FILE:tclzmachine>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/games/compiled/tclzmachine-v3.z3)
 endif()
