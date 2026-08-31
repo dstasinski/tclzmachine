@@ -69,6 +69,10 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(version-layout-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME version-layout COMMAND version-layout-test)
 
+    add_executable(header-test tests/header.c src/zmachine_header.c)
+    target_include_directories(header-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    add_test(NAME interpreter-header COMMAND header-test)
+
     add_executable(instruction-decode-test tests/instruction_decode.c src/zmachine_decode.c)
     target_include_directories(instruction-decode-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME instruction-decode COMMAND instruction-decode-test)
