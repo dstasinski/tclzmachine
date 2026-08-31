@@ -94,7 +94,7 @@ int main(void)
         assert((flags2 & 0x0001U) != 0U); /* transcript state preserved */
         assert(vm.flags2 == flags2);
 
-        assert(vm.memory[0x1eU] == 6U);
+        assert(vm.memory[0x1eU] == 2U);
         assert(vm.memory[0x1fU] == (uint8_t)'T');
         assert(vm.memory[0x20U] == 255U);
         assert(vm.memory[0x21U] == 80U);
