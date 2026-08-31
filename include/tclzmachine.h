@@ -30,6 +30,13 @@ extern "C" {
 /* Opaque heap-owned cache used only after a story requests save_undo. */
 typedef struct ZMachineUndoState ZMachineUndoState;
 
+/*
+ * Opaque host-file stream state. This lazily owns replay/transcript/record FILE
+ * handles and their interpreter-only selection state without exposing stdio
+ * implementation details through the public VM structure.
+ */
+typedef struct ZMachineStreamIO ZMachineStreamIO;
+
 /* Coarse execution state visible to the Tcl-facing session layer. */
 typedef enum ZMachineRunState {
     ZM_STATE_READY = 0,
@@ -38,7 +45,8 @@ typedef enum ZMachineRunState {
     ZM_STATE_ERROR,
     /* Cooperative host-file requests; appended to preserve existing values. */
     ZM_STATE_WAITING_SAVE,
-    ZM_STATE_WAITING_RESTORE
+    ZM_STATE_WAITING_RESTORE,
+    ZM_STATE_WAITING_STREAM_FILE
 } ZMachineRunState;
 
 /*
@@ -70,6 +78,9 @@ struct ZMachine {
 
     /* Optional one-level in-memory save used by EXT:9/EXT:10 undo opcodes. */
     ZMachineUndoState *undo_state;
+
+    /* Optional replay/transcript/command-record host stream state. */
+    ZMachineStreamIO *stream_io;
 
     /* Cached fields from the story-file header. */
     uint8_t version;
