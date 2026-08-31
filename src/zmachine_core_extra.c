@@ -18,11 +18,19 @@
  * implementation-defined signed right-shift behavior by doing all bit movement
  * in the unsigned 16-bit value domain and explicitly filling sign bits.
  *
- * input_stream is host-neutral in an embedded interpreter: Tcl owns the physical
- * source of queued input, so the two standard stream numbers are accepted without
- * introducing terminal/file policy into the VM. sound_effect is likewise
- * consumed as an unavailable presentation effect after normal operand evaluation;
- * the interpreter header already tells stories that sampled sound is unavailable.
+ * input_stream's physical command-file policy is owned by the higher stream
+ * wrapper; this layer retains the host-neutral validation fallback for standard
+ * stream numbers. sound_effect is consumed as an unavailable presentation effect
+ * after normal operand evaluation because the interpreter header advertises no
+ * sampled-sound capability.
+ *
+ * EXT:29 buffer_screen is meaningful in V6+ and therefore in supported V7/V8.
+ * A text-only interpreter may ignore buffering advice provided it always behaves
+ * as mode 0, so tclzmachine reports old state 0 without adding screen state.
+ * In V5, where EXT:29 is not yet defined, and for EXT:30..255 in all supported
+ * versions, the Standard explicitly requires the out-of-range extended opcode to
+ * be ignored. Those ignored instructions advance past their decoded operands
+ * without resolving them, so variable 0 cannot acquire a spurious stack pop.
  */
 
 #include "tclzmachine.h"
@@ -178,6 +186,11 @@ static int owns_instruction(const ZMachine *vm,
     if (vm->version < 5U)
         return 0;
 
+    /* EXT:29+ needs the Standard's version-sensitive ignore rule. */
+    if (instruction->form == ZM_FORM_EXTENDED &&
+        instruction->opcode_number >= 29U)
+        return 1;
+
     if (instruction->operand_count == ZM_OPERANDS_0OP &&
         instruction->opcode_number == 9U)
         return 1; /* catch */
@@ -284,6 +297,48 @@ int zmachine_step_core(ZMachine *vm)
     if (!owns_instruction(vm, &instruction))
         return zmachine_step_core_base(vm);
 
+    /*
+     * Out-of-range EXT opcodes are a deliberate exception to ordinary operand
+     * evaluation. In V5, EXT:29 is not defined yet; EXT:30..255 are reserved or
+     * implementation-specific in every supported version. The Standard says to
+     * ignore these instructions, so advance over their decoded operand bytes
+     * without resolving variables (especially stack variable 0).
+     *
+     * EXT:29 becomes buffer_screen in V6+ and is handled normally below. Since
+     * V6 stories are rejected at load time, this path is principally for V7/V8.
+     */
+    if (instruction.form == ZM_FORM_EXTENDED &&
+        instruction.opcode_number >= 29U &&
+        (instruction.opcode_number != 29U || vm->version < 6U)) {
+        vm->pc = instruction.next_pc;
+        return TCL_OK;
+    }
+
+    /*
+     * buffer_screen mode -> result (V6+).
+     *
+     * This runtime has no visible display backing store. The Standard permits an
+     * interpreter to ignore the buffering advice if it always behaves as though
+     * mode 0 is active. Therefore the old state is deterministically 0 for mode
+     * 0, mode 1, and the -1 immediate-update request. Arity/range validation is
+     * performed before storing a result, and the single operand is evaluated
+     * exactly once like every other real opcode.
+     */
+    if (instruction.form == ZM_FORM_EXTENDED &&
+        instruction.opcode_number == 29U) {
+        int16_t mode;
+
+        if (instruction.operand_count_actual != 1U)
+            return core_extra_error(vm, "buffer_screen requires exactly one mode operand");
+        if (zmachine_resolve_operands(vm, &instruction, values,
+                                      ZM_MAX_OPERANDS) != TCL_OK)
+            return TCL_ERROR;
+        mode = (int16_t)values[0];
+        if (mode != -1 && mode != 0 && mode != 1)
+            return core_extra_error(vm, "invalid buffer_screen mode");
+        return store_value(vm, instruction.next_pc, 0U);
+    }
+
     if (instruction.operand_count_actual > 0U &&
         zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
@@ -294,9 +349,8 @@ int zmachine_step_core(ZMachine *vm)
         instruction.opcode_number == 20U) {
         /*
          * input_stream 0/1 selects keyboard/command-file input in a terminal
-         * interpreter. In tclzmachine the Tcl host is the source abstraction,
-         * so both standard selections are accepted while all actual characters
-         * continue to arrive through the same queued-input API.
+         * interpreter. The higher stream wrapper supplies the actual host-file
+         * policy; this fallback still validates the only standard stream values.
          */
         if (instruction.operand_count_actual != 1U)
             return core_extra_error(vm, "input_stream requires one operand");
