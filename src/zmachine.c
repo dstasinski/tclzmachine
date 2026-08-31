@@ -129,7 +129,18 @@ static int store_result(ZMachine *vm, uint32_t store_pc,
     return TCL_OK;
 }
 
-/* Compute the story-file checksum used by the verify opcode. */
+/*
+ * Compute the story-file checksum used by the verify opcode.
+ *
+ * `verify` describes the bytes of the loaded story file, not the current state
+ * of play. Dynamic memory can change on every turn and interpreter-owned header
+ * fields are deliberately rewritten after load/restart/restore, so summing
+ * vm->memory directly would make a valid story fail verification after normal
+ * execution. Bytes below static memory therefore come from the pristine restart
+ * image captured at load time; immutable bytes at and above static memory can be
+ * read from the live image. Synthetic/unit-test VMs without a restart image fall
+ * back to their live bytes, but normal loaded sessions always have the snapshot.
+ */
 static int story_checksum_matches(const ZMachine *vm)
 {
     size_t end;
@@ -144,8 +155,13 @@ static int story_checksum_matches(const ZMachine *vm)
     if (end > vm->memory_size)
         end = vm->memory_size;
 
-    for (i = ZM_HEADER_SIZE; i < end; ++i)
-        sum += vm->memory[i];
+    for (i = ZM_HEADER_SIZE; i < end; ++i) {
+        if (vm->initial_dynamic_memory &&
+            i < vm->initial_dynamic_memory_size)
+            sum += vm->initial_dynamic_memory[i];
+        else
+            sum += vm->memory[i];
+    }
 
     return (uint16_t)sum == vm->checksum;
 }
