@@ -18,6 +18,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_file.c
     src/zmachine_header.c
     src/zmachine_input.c
+    src/zmachine_input_preload.c
     src/zmachine_object.c
     src/zmachine_property.c
     src/zmachine_quetzal.c
@@ -44,6 +45,15 @@ set_source_files_properties(src/zmachine_exec.c PROPERTIES
 )
 set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
+)
+
+#
+# V5+ read/aread may begin with characters already present in the text buffer.
+# Keep the mature writer/tokenizer as the base implementation and let the small
+# preload wrapper merge that prefix with Tcl input before delegation.
+#
+set_source_files_properties(src/zmachine_input.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_input_read_line=zmachine_input_read_line_base"
 )
 
 add_library(tclzmachine SHARED
@@ -113,6 +123,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(input-run-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(input-run-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME input-run-loop COMMAND input-run-test)
+
+    add_executable(input-preload-test tests/input_preload.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(input-preload-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(input-preload-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME input-preload COMMAND input-preload-test)
 
     add_executable(core-compat-test tests/core_compat.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(core-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
