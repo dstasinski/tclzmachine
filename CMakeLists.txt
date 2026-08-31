@@ -135,6 +135,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(presentation-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME presentation-opcodes COMMAND presentation-test)
 
+    add_executable(get-child-stack-test tests/get_child_stack.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(get-child-stack-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(get-child-stack-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME get-child-stack-operand COMMAND get-child-stack-test)
+
     add_test(NAME package-smoke
              COMMAND ${TCL_TCLSH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.tcl
                      $<TARGET_FILE:tclzmachine>)
