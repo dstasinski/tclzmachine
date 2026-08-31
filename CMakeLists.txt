@@ -13,6 +13,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
     src/zmachine_decode.c
     src/zmachine_dispatch.c
+    src/zmachine_core_extra.c
     src/zmachine_exec.c
     src/zmachine_file.c
     src/zmachine_header.c
@@ -31,14 +32,15 @@ set(TCLZMACHINE_VM_SOURCES
 #
 # Instruction execution is layered so each module owns one concern:
 #   zmachine_file.c       public zmachine_step(), cooperative file requests
-#   zmachine_tokenise.c   non-blocking lexical analysis opcode
+#   zmachine_tokenise.c   non-blocking lexical analysis opcodes
 #   zmachine_dispatch.c   presentation/text-only compatibility wrapper
-#   zmachine_exec.c       ordinary core opcode executor
-# Rename the two lower implementations at compile time rather than duplicating
-# their APIs or mixing file/presentation policy into the core executor.
+#   zmachine_core_extra.c pure control/arithmetic completeness opcodes
+#   zmachine_exec.c       original ordinary core opcode executor
+# The original core and presentation implementations are renamed at compile
+# time so each wrapper can delegate downward without duplicating public APIs.
 #
 set_source_files_properties(src/zmachine_exec.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core"
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core_base"
 )
 set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
@@ -116,6 +118,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(core-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(core-compat-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME core-compat-opcodes COMMAND core-compat-test)
+
+    add_executable(core-extra-test tests/core_extra.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(core-extra-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(core-extra-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME core-extra-opcodes COMMAND core-extra-test)
 
     add_executable(property-length-test tests/property_length.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(property-length-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
