@@ -7,8 +7,8 @@
  * The test exercises the public instruction path, the main story dictionary,
  * the optional user-dictionary operand, dictionary separators, parse-buffer
  * positions, the flag which preserves slots for unrecognized words, exact
- * dictionary encryption (including A2, truncation, and custom alphabets), and
- * the distinction between read's special parse=0 convention and tokenise's
+ * dictionary encryption (including case, A2, truncation, and custom alphabets),
+ * and the distinction between read's special parse=0 convention and tokenise's
  * required parse-table destination.
  */
 
@@ -44,6 +44,9 @@ int main(void)
 {
     static const uint8_t encoded_look[6] = {
         0x46U, 0x94U, 0x40U, 0xA5U, 0x94U, 0xA5U
+    };
+    static const uint8_t encoded_upper_look[6] = {
+        0x12U, 0x24U, 0x50U, 0x94U, 0x92U, 0x05U
     };
     static const uint8_t encoded_mystery[6] = {
         0x4BU, 0xD8U, 0x65U, 0x57U, 0xF8U, 0xA5U
@@ -138,6 +141,48 @@ int main(void)
     assert(vm.pc == 0x56U);
     assert(memcmp(vm.memory + 0xA0U, encoded_look, 6U) == 0);
 
+    /*
+     * encode_text acts on ZSCII already in story memory and must not inherit
+     * read's lower-case conversion. "LOOK" therefore uses an A1 shift before
+     * every upper-case letter instead of producing the lower-case "look" key.
+     */
+    memcpy(vm.memory + 0x160U, "LOOK", 4U);
+    memset(vm.memory + 0xC8U, 0, 6U);
+    vm.pc = 0xF0U;
+    vm.memory[0xF0U] = 0xFCU;
+    vm.memory[0xF1U] = 0x51U; /* small, small, large, small */
+    vm.memory[0xF2U] = 0x60U;
+    vm.memory[0xF3U] = 4U;
+    vm.memory[0xF4U] = 0x01U;
+    vm.memory[0xF5U] = 0x00U;
+    vm.memory[0xF6U] = 0xC8U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0xF7U);
+    assert(memcmp(vm.memory + 0xC8U, encoded_upper_look, 6U) == 0);
+
+    /*
+     * tokenise is likewise case-preserving. A user dictionary containing only
+     * upper-case "LOOK" must match an upper-case text buffer; lowercasing here
+     * would instead search for the main dictionary's different binary key.
+     */
+    write_dictionary(&vm, 0x140U, encoded_upper_look);
+    vm.memory[0x60U] = 10U;
+    vm.memory[0x61U] = 4U;
+    memcpy(vm.memory + 0x62U, "LOOK", 4U);
+    vm.memory[0x90U] = 1U;
+    vm.pc = 0xF8U;
+    vm.memory[0xF8U] = 0xFBU;
+    vm.memory[0xF9U] = 0x53U; /* small, small, large, omitted */
+    vm.memory[0xFAU] = 0x60U;
+    vm.memory[0xFBU] = 0x90U;
+    vm.memory[0xFCU] = 0x01U;
+    vm.memory[0xFDU] = 0x40U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0xFEU);
+    assert(vm.memory[0x91U] == 1U);
+    assert(word_at(vm.memory, 0x92U) == 0x145U);
+    assert(vm.memory[0x94U] == 4U && vm.memory[0x95U] == 2U);
+
     /* Default A2/8 is digit zero; A2/6 is the ZSCII escape, not '0'. */
     vm.memory[0x70U] = (uint8_t)'0';
     memset(vm.memory + 0xB0U, 0, 6U);
@@ -171,9 +216,9 @@ int main(void)
     assert(memcmp(vm.memory + 0xB8U, encoded_partial_escape, 6U) == 0);
 
     /*
-     * Install a V5 custom alphabet table whose A1 Z-character 6 is '@'. Input
-     * is lowercased first, then all custom alphabets are searched; the encoded
-     * key therefore begins with shift-A1 (4), then Z-character 6.
+     * Install a V5 custom alphabet table whose A1 Z-character 6 is '@'. Since
+     * encode_text preserves the story-memory byte exactly, the encoded key
+     * begins with shift-A1 (4), then Z-character 6.
      */
     vm.memory[0x34U] = 0x01U;
     vm.memory[0x35U] = 0x80U;
