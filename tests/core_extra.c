@@ -2,10 +2,10 @@
  * core_extra.c
  *
  * Regression coverage for V5+ core opcodes implemented by the incremental
- * standards-completeness layer: catch/throw, VAR-form not, and the two EXT
- * shifts. Tests execute through the public layered zmachine_step() entry point
- * so decoder form distinctions and delegation behavior are exercised as well as
- * the opcode calculations themselves.
+ * standards-completeness layer: catch/throw, VAR-form not, the two EXT shifts,
+ * and delegated-core operand validation. Tests execute through the public
+ * layered zmachine_step() entry point so decoder form distinctions, validation,
+ * and delegation behavior are exercised as well as opcode calculations.
  */
 
 #include "tclzmachine.h"
@@ -207,6 +207,58 @@ int main(void)
         assert(zmachine_step(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
         assert(strstr(vm.error, "inactive") != NULL);
+        free_vm(&vm);
+    }
+
+    /*
+     * Variable-form 2OP instructions can be syntactically decoded from a type
+     * byte with too few operands. `je` explicitly forbids a one-operand form;
+     * rejecting it here proves malformed code cannot reach the base executor's
+     * operand array with missing values.
+     */
+    {
+        ZMachine vm;
+
+        init_vm(&vm);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xC1U; /* variable-form 2OP:1 je */
+        vm.memory[0x21U] = 0x7FU; /* one small constant, then omitted */
+        vm.memory[0x22U] = 1U;
+        assert(zmachine_step(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "je requires") != NULL);
+        free_vm(&vm);
+    }
+
+    /* Ordinary 2OP arithmetic likewise requires both operands. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xD4U; /* variable-form 2OP:20 add */
+        vm.memory[0x21U] = 0x7FU; /* one small constant only */
+        vm.memory[0x22U] = 1U;
+        assert(zmachine_step(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "exactly two operands") != NULL);
+        free_vm(&vm);
+    }
+
+    /* Fixed-shape VAR opcodes are checked before values[2] can be read. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xE1U; /* VAR:1 storew */
+        vm.memory[0x21U] = 0x5FU; /* two small constants, third omitted */
+        vm.memory[0x22U] = 0x40U;
+        vm.memory[0x23U] = 0x01U;
+        assert(zmachine_step(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "three-operand") != NULL);
+        assert(vm.memory[0x42U] == 0U && vm.memory[0x43U] == 0U);
         free_vm(&vm);
     }
 
