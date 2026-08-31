@@ -9,6 +9,11 @@
  * layer adjacent to the input subsystem lets all three operations share one
  * dictionary implementation without moving host input policy into the
  * ordinary executor.
+ *
+ * CMake places this layer between cooperative file dispatch and presentation
+ * dispatch. It therefore decodes only far enough to recognize its two VAR-table
+ * opcodes, resolves their operands exactly once, then either executes locally or
+ * delegates the untouched instruction path downward.
  */
 
 #include "tclzmachine.h"
@@ -21,6 +26,7 @@
 /* Presentation wrapper supplied by zmachine_dispatch.c after symbol rename. */
 extern int zmachine_step_present(ZMachine *vm);
 
+/* Put the VM in its terminal error state with a lexical-layer diagnostic. */
 static int lexical_error(ZMachine *vm, const char *message)
 {
     if (vm) {
@@ -31,8 +37,21 @@ static int lexical_error(ZMachine *vm, const char *message)
 }
 
 /*
- * Execute one instruction, consuming supported lexical VAR opcodes locally and
- * delegating everything else to the presentation/core layers.
+ * Execute one instruction through the non-blocking lexical layer.
+ *
+ * Only V5+ VAR:27 (`tokenise`) and VAR:28 (`encode_text`) are consumed here.
+ * Everything else delegates to the presentation/core chain without resolving
+ * operands in this layer, avoiding observable double reads/pops of variable 0.
+ *
+ * tokenise operands are:
+ *   text buffer, parse buffer, optional dictionary address, optional flag.
+ * A zero/omitted dictionary selects the story's main dictionary. A nonzero flag
+ * asks the tokenizer to leave parse entries for unrecognized words unchanged.
+ *
+ * encode_text operands are:
+ *   source text address, source length, source offset, destination address.
+ * The shared input/dictionary subsystem performs the version-correct dictionary
+ * encoding and all story-memory bounds checks.
  */
 int zmachine_step_tokenise(ZMachine *vm)
 {
