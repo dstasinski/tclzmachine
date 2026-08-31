@@ -333,6 +333,17 @@ static int handle_window_opcode(ZMachine *vm,
 
     case 16U: { /* get_cursor array */
         uint32_t array = values[0];
+
+        /*
+         * get_cursor writes a four-byte structure. Validate the complete range
+         * before changing either word so a malformed destination cannot leave
+         * a half-written cursor record behind when the second word is invalid.
+         */
+        if (!vm->memory ||
+            (size_t)array + 3U >= vm->memory_size ||
+            (size_t)array + 3U >= (size_t)vm->static_memory_addr)
+            return dispatch_error(vm, "presentation opcode writes outside dynamic memory");
+
         if (write_dynamic_word(vm, array, 1U) != TCL_OK ||
             write_dynamic_word(vm, array + 2U, 1U) != TCL_OK)
             return TCL_ERROR;
