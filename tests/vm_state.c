@@ -1,3 +1,16 @@
+/*
+ * vm_state.c
+ *
+ * Unit coverage for the foundational VM state primitives beneath instruction
+ * execution. The test locks down ordinary versus indirect variable-0 stack
+ * semantics, routine-frame local ownership and stack floors, frame metadata,
+ * big-endian global-variable storage across the full global-number range, and
+ * rejection of local-variable access when no routine frame exists.
+ *
+ * These helpers are deliberately tested without decoding opcodes so state bugs
+ * can be distinguished from instruction encoding/dispatch failures.
+ */
+
 #include "tclzmachine.h"
 
 #include <assert.h>
@@ -5,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Initialize a VM around caller-owned memory; no heap/Tcl-string teardown is needed. */
 static void init_vm(ZMachine *vm, uint8_t *memory, size_t memory_size)
 {
     memset(vm, 0, sizeof(*vm));
@@ -26,7 +40,7 @@ int main(void)
 
     init_vm(&vm, memory, sizeof(memory));
 
-    /* Variable 0 pushes on write and pops on read. */
+    /* Variable 0 pushes on ordinary write and pops on ordinary read. */
     assert(zmachine_variable_write(&vm, 0, 0, 0x1234) == TCL_OK);
     assert(vm.sp == 1);
     assert(zmachine_variable_read(&vm, 0, 0, &value) == TCL_OK);
@@ -51,6 +65,7 @@ int main(void)
     assert(zmachine_variable_read(&vm, 3, 0, &value) == TCL_OK);
     assert(value == 0x7777);
 
+    /* Frame pop discards only callee evaluation words and preserves caller stack. */
     assert(zmachine_stack_push(&vm, 0xaaaa) == TCL_OK);
     assert(zmachine_frame_pop(&vm, &popped) == TCL_OK);
     assert(popped.return_pc == 0x4242);
@@ -65,6 +80,7 @@ int main(void)
     assert(zmachine_variable_read(&vm, 0x10, 0, &value) == TCL_OK);
     assert(value == 0x1357);
 
+    /* Highest legal global variable maps through the same address calculation. */
     assert(zmachine_variable_write(&vm, 0xff, 0, 0x2468) == TCL_OK);
     assert(zmachine_variable_read(&vm, 0xff, 0, &value) == TCL_OK);
     assert(value == 0x2468);
