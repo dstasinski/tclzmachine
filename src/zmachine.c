@@ -738,10 +738,13 @@ static int output_stream3_append_byte(ZMachine *vm, uint8_t zscii)
  *
  * Stream 3 has precedence over every other selected output stream. Canonical
  * newlines are converted back to ZSCII 13 for the memory table; printable ASCII
- * is stored directly. A non-ASCII UTF-8 codepoint currently becomes one '?',
- * matching this runtime's existing fallback until the full ZSCII/Unicode table
- * is implemented. When stream 3 is inactive, output reaches the Tcl-facing
- * canonical buffer only while stream 1 is selected.
+ * is stored directly. Generic non-ASCII UTF-8 appended outside the ZSCII-aware
+ * text module becomes one '?' in stream 3; print_char and print_unicode use the
+ * text module and therefore preserve/reverse-map their proper ZSCII values.
+ *
+ * When stream 3 is inactive, only stream 1 output for lower window 0 reaches the
+ * Tcl-facing canonical buffer. Upper-window/status text is presentation-only in
+ * this IRC runtime and is discarded while the story keeps its selected window.
  */
 void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
 {
@@ -778,7 +781,7 @@ void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
         return;
     }
 
-    if (!vm->output_stream1_enabled)
+    if (!vm->output_stream1_enabled || vm->current_window != 0U)
         return;
 
     Tcl_DStringAppend(&vm->output, text, (int)len);
