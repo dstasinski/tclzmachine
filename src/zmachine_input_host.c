@@ -41,7 +41,10 @@ int zmachine_supply_input(ZMachine *vm, const char *line)
     }
 
     rc = zmachine_supply_input_base(vm, line);
-    if (rc == TCL_OK)
+    if (rc == TCL_OK) {
+        /* A complete command string represents the normal Enter termination. */
+        vm->pending_input_terminator = 13U;
         vm->error[0] = '\0';
+    }
     return rc;
 }
