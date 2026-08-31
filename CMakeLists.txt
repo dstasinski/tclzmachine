@@ -12,6 +12,7 @@ find_package(TCL 8.6 REQUIRED)
 set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
     src/zmachine_run.c
+    src/zmachine_stream.c
     src/zmachine_decode.c
     src/zmachine_dispatch.c
     src/zmachine_key.c
@@ -36,7 +37,9 @@ set(TCLZMACHINE_VM_SOURCES
 
 #
 # Instruction execution is layered so each module owns one concern:
-#   zmachine_file_aux.c   public step/file API, V5+ auxiliary byte-region files
+#   zmachine_stream.c     public step/run/output/input boundary for external
+#                        replay, transcript, and command-record files
+#   zmachine_file_aux.c   V5+ auxiliary byte-region save/restore requests
 #   zmachine_file.c       full-game Quetzal file-request base layer
 #   zmachine_tokenise.c   non-blocking lexical analysis opcodes
 #   zmachine_key.c        exact numeric ZSCII input for read_char
@@ -56,25 +59,35 @@ set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
 set_source_files_properties(src/zmachine_file.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_file_base;zmachine_save_file=zmachine_save_file_base;zmachine_restore_file=zmachine_restore_file_base;zmachine_cancel_file=zmachine_cancel_file_base"
 )
+set_source_files_properties(src/zmachine_file_aux.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_stream_base"
+)
 
 #
-# The form-aware public cooperative loop now lives in zmachine_run.c. Keep the
-# previous loop compiled under a private legacy name while lifetime/story/output
-# responsibilities are still co-located in zmachine.c. Host line-input validation
-# similarly wraps the original queue routine from zmachine.c so UTF-8/Tcl policy
-# remains outside the VM's story-management implementation.
+# The form-aware cooperative loop lives in zmachine_run.c. The stream wrapper
+# becomes the public run function so replay input can feed multiple cooperative
+# turns without exposing command-file mechanics to the ordinary run loop.
+# Story lifetime and canonical output remain in zmachine.c under private symbols
+# which the stream layer wraps to own FILE lifetimes and transcript output.
 #
+set_source_files_properties(src/zmachine_run.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_stream_base"
+)
 set_source_files_properties(src/zmachine.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base"
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base;zmachine_output_append=zmachine_output_append_stream_base;zmachine_destroy=zmachine_destroy_stream_base;zmachine_load_story=zmachine_load_story_stream_base;zmachine_reset=zmachine_reset_stream_base"
 )
 
 #
 # V5+ read/aread may begin with characters already present in the text buffer.
-# Keep the mature writer/tokenizer as the base implementation and let the small
-# preload wrapper merge that prefix with Tcl input before delegation.
+# Keep the mature writer/tokenizer as the base implementation, let the preload
+# wrapper merge that prefix, and let zmachine_stream.c add transcript/recording
+# side effects only after the final story buffer is known.
 #
 set_source_files_properties(src/zmachine_input.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_input_read_line=zmachine_input_read_line_base"
+)
+set_source_files_properties(src/zmachine_input_preload.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_input_read_line=zmachine_input_read_line_stream_base"
 )
 
 add_library(tclzmachine SHARED
