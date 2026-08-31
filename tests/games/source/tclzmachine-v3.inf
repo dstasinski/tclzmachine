@@ -1,0 +1,94 @@
+!% -v3
+!% $SERIAL=260830
+
+! tclzmachine-v3.inf
+!
+! Compact, repository-owned Version 3 integration fixture for tclzmachine.
+! It intentionally does not include the modern Inform standard library, which
+! requires V5+ features.  Instead it uses ordinary Inform control flow and a
+! small set of direct Z-machine opcodes so the fixture exercises the actual V3
+! VM model without depending on copyrighted or external story files.
+!
+! The first character of each input line is enough to select most commands;
+! "save" and "south" are distinguished by the second character.  The script
+! tests line input, calls, globals, V3 object-tree layout, insert_obj, branches,
+! canonical text output, and persistent state across Tcl calls.
+
+Array InputBuffer -> 34;
+Global RoomState = 0;
+
+Object TestChamber "test chamber";
+Object -> Lamp "brass lamp";
+Object NorthRoom "north room";
+Object Player "player";
+
+[ ShowLocation;
+    if (RoomState == 0) {
+        print "V3 Test Chamber^A compact Version 3 test chamber.^";
+    } else {
+        print "V3 North Room^A second Version 3 room.^";
+    }
+];
+
+[ ShowInventory p;
+    @get_parent Lamp -> p;
+    if (p == Player)
+        print "You are carrying the brass lamp.^";
+    else
+        print "You are carrying nothing.^";
+];
+
+[ Main c c2 p first_child;
+    print "tclzmachine V3 fixture ready.^";
+
+    @get_child TestChamber -> first_child ?TreePresent;
+    print "V3 object tree failed.^";
+    jump MainLoop;
+
+.TreePresent;
+    if (first_child == Lamp)
+        print "V3 object tree ready.^";
+    else
+        print "V3 object tree failed.^";
+
+.MainLoop;
+    for (::) {
+        print "> ";
+        InputBuffer->0 = 30;
+        @sread InputBuffer 0;
+        c = InputBuffer->1;
+        c2 = InputBuffer->2;
+
+        if (c == 'l') {
+            ShowLocation();
+        } else if (c == 't') {
+            @get_parent Lamp -> p;
+            if (p == Player) {
+                print "You already have the lamp.^";
+            } else {
+                @insert_obj Lamp Player;
+                print "Taken.^";
+            }
+        } else if (c == 'd') {
+            @get_parent Lamp -> p;
+            if (p == Player) {
+                @insert_obj Lamp TestChamber;
+                print "Dropped.^";
+            } else {
+                print "You are not carrying the lamp.^";
+            }
+        } else if (c == 'i') {
+            ShowInventory();
+        } else if (c == 'n') {
+            RoomState = 1;
+            ShowLocation();
+        } else if (c == 's' && c2 == 'o') {
+            RoomState = 0;
+            ShowLocation();
+        } else if (c == 'q') {
+            @quit;
+        } else {
+            print "Try LOOK, TAKE, DROP, INVENTORY, NORTH, SOUTH, or QUIT.^";
+        }
+    }
+];
