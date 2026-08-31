@@ -1,15 +1,17 @@
 /*
  * io_compat.c
  *
- * Regression coverage for host-neutral input_stream and unavailable sound
- * compatibility. The Tcl host owns the physical origin of queued input, while
- * sound is intentionally absent from this text-only interpreter. Both opcodes
- * must nevertheless decode and evaluate operands with normal VM side effects.
+ * Regression coverage for Z-machine input_stream selection and unavailable
+ * sound compatibility. Stream 0 selects interactive host input immediately;
+ * selecting stream 1 without a configured replay file yields cooperatively so
+ * Tcl can choose the command-file path. Sound remains intentionally absent from
+ * this text-only interpreter, but its operands still have normal VM effects.
  */
 
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
 #include "zmachine_state.h"
+#include "zmachine_stream.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -32,14 +34,17 @@ static void init_vm(ZMachine *vm)
 
 static void free_vm(ZMachine *vm)
 {
+    /* Public reset also releases any lazily allocated host stream state. */
+    assert(zmachine_reset(vm) == TCL_OK);
     free(vm->memory);
+    vm->memory = NULL;
     Tcl_DStringFree(&vm->output);
     Tcl_DStringFree(&vm->pending_input);
 }
 
 int main(void)
 {
-    /* Both standard input-stream numbers are accepted by the embedded host. */
+    /* Stream 0 is immediate; first selection of stream 1 requests a host file. */
     {
         ZMachine vm;
 
@@ -54,8 +59,18 @@ int main(void)
 
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x23U);
+        assert(zmachine_current_input_stream(&vm) == 0);
+
         assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x23U);
+        assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);
+        assert(strcmp(zmachine_pending_stream_request(&vm), "replay") == 0);
+
+        /* Declining replay leaves keyboard input selected and advances opcode. */
+        assert(zmachine_cancel_stream_file(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_READY);
         assert(vm.pc == 0x26U);
+        assert(zmachine_current_input_stream(&vm) == 0);
         free_vm(&vm);
     }
 
@@ -72,7 +87,10 @@ int main(void)
         assert(zmachine_step(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
         assert(strstr(vm.error, "input stream") != NULL);
-        free_vm(&vm);
+        /* Do not call reset on a deliberately errored VM; no stream state exists. */
+        free(vm.memory);
+        Tcl_DStringFree(&vm.output);
+        Tcl_DStringFree(&vm.pending_input);
     }
 
     /* Historical zero-operand sound_effect is harmless even without sound. */
