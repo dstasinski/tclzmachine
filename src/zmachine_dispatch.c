@@ -288,9 +288,12 @@ static int handle_null_get_child(ZMachine *vm,
  * Versions 3-5, 7 and 8 have lower window 0 and upper window 1. This runtime
  * retains only which window is selected; all nonzero-window text is discarded
  * at the canonical output boundary so status/layout output cannot leak into an
- * IRC reply. erase_line has no textual state to mutate. get_cursor must still
- * write an array, so the virtual text-only screen reports deterministic row 1,
- * column 1 while enforcing dynamic-memory bounds.
+ * IRC reply. erase_window -1 is stateful even in this reduced model: the
+ * Standard requires it to select window 0, which determines whether subsequent
+ * text is narrative output or discarded upper-window presentation. erase_line
+ * has no textual state to mutate. get_cursor must still write an array, so the
+ * virtual text-only screen reports deterministic row 1, column 1 while enforcing
+ * dynamic-memory bounds.
  */
 static int handle_window_opcode(ZMachine *vm,
                                 const ZMachineInstruction *instruction,
@@ -305,6 +308,7 @@ static int handle_window_opcode(ZMachine *vm,
         return TCL_OK;
 
     if (instruction->opcode_number != 11U &&
+        instruction->opcode_number != 13U &&
         instruction->opcode_number != 14U &&
         instruction->opcode_number != 16U)
         return TCL_OK;
@@ -326,6 +330,19 @@ static int handle_window_opcode(ZMachine *vm,
         vm->current_window = (uint8_t)values[0];
         vm->pc = instruction->next_pc;
         return TCL_OK;
+
+    case 13U: { /* erase_window window */
+        int16_t window = (int16_t)values[0];
+
+        if (window == -1) {
+            /* Clearing/unsplitting the entire screen also selects window 0. */
+            vm->current_window = 0U;
+        } else if (window != -2 && window != 0 && window != 1) {
+            return dispatch_error(vm, "unsupported Z-machine window number");
+        }
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
 
     case 14U: /* erase_line value -- presentation-only outside V6. */
         vm->pc = instruction->next_pc;
@@ -396,8 +413,7 @@ static int is_text_only_noop(const ZMachine *vm,
     if (vm->version < 4U)
         return 0;
 
-    return instruction->opcode_number == 13U ||
-           instruction->opcode_number == 15U ||
+    return instruction->opcode_number == 15U ||
            instruction->opcode_number == 17U ||
            instruction->opcode_number == 18U;
 }
