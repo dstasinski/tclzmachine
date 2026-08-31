@@ -138,9 +138,18 @@ struct ZMachine {
     uint16_t stream3_tables[ZM_MAX_STREAM3_DEPTH];
     size_t stream3_depth;
 
-    /* Canonical output and one queued line/character of player input. */
+    /*
+     * Canonical output and one queued unit of player input.
+     *
+     * pending_input holds line text or the private two-byte read_char sentinel.
+     * pending_input_terminator is normally carriage return (13); when a V5+
+     * terminating-character-table function key finishes `read`, it carries that
+     * exact ZSCII code so aread can store the correct result without placing the
+     * input-only key in the text buffer.
+     */
     Tcl_DString output;
     Tcl_DString pending_input;
+    uint16_t pending_input_terminator;
     int input_available;
 
     ZMachineRunState state;
