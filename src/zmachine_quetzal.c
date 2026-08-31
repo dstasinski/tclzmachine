@@ -8,6 +8,11 @@
  * evaluation stacks in Stks. tclzmachine writes UMem because dynamic memory is
  * at most 64 KiB and simplicity matters more than disk compression here, but
  * the reader accepts both forms for interoperability with other interpreters.
+ *
+ * Restore is deliberately transactional. The entire FORM, story identity,
+ * memory image, and Stks frames are validated into temporary buffers before any
+ * live VM state is replaced. A malformed or wrong-story file therefore leaves
+ * the current session intact and lets the Tcl host retry another path.
  */
 
 #include "tclzmachine.h"
@@ -19,10 +24,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* FORM + 32-bit length + IFZS type. */
 #define QUETZAL_FORM_HEADER 12U
+
+/* IFhd payload: release(2), serial(6), checksum(2), saved PC(3). */
 #define QUETZAL_IFHD_LENGTH 13U
+
+/* Ordinary story-file checksum begins after the 64-byte Z-machine header. */
 #define ZM_STORY_CHECKSUM_START 0x40U
 
+/* Record a persistence-layer diagnostic without forcing a particular VM state. */
 static int quetzal_error(ZMachine *vm, const char *message)
 {
     if (vm)
@@ -30,6 +41,7 @@ static int quetzal_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
+/* Big-endian integer readers used for IFF/Quetzal fields already in memory. */
 static uint16_t read_be16(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
@@ -50,6 +62,7 @@ static uint32_t read_be32(const uint8_t *p)
            (uint32_t)p[3];
 }
 
+/* FILE helpers return boolean success so compound chunk writes remain simple. */
 static int write_bytes(FILE *fp, const void *data, size_t length)
 {
     return length == 0U || fwrite(data, 1U, length, fp) == length;
@@ -87,6 +100,7 @@ static int write_be32(FILE *fp, uint32_t value)
     return write_bytes(fp, b, sizeof(b));
 }
 
+/* Write one four-byte IFF chunk/form identifier exactly as supplied. */
 static int write_id(FILE *fp, const char id[4])
 {
     return write_bytes(fp, id, 4U);
@@ -130,6 +144,16 @@ static uint16_t story_identity_checksum(const ZMachine *vm)
     return (uint16_t)sum;
 }
 
+/*
+ * Calculate the exact Stks payload length and validate the live stack layout.
+ *
+ * Quetzal begins Stks with a mandatory dummy top-level frame containing any
+ * evaluation-stack words that precede the first routine frame. Each real frame
+ * then contributes an 8-byte header, its local variables, and only the eval
+ * stack words belonging to that frame. Internal ZMachineFrame::stack_base values
+ * make those per-frame slices explicit even though the VM stores one contiguous
+ * evaluation stack.
+ */
 static int stks_length(ZMachine *vm, uint32_t *length_out)
 {
     size_t length;
@@ -173,6 +197,7 @@ static int stks_length(ZMachine *vm, uint32_t *length_out)
     return TCL_OK;
 }
 
+/* Serialize stack[first,last) as Quetzal big-endian 16-bit words. */
 static int write_stack_words(FILE *fp,
                              const uint16_t *stack,
                              size_t first,
@@ -186,6 +211,15 @@ static int write_stack_words(FILE *fp,
     return 1;
 }
 
+/*
+ * Write the complete Stks chunk from internal frame/stack state.
+ *
+ * The mandatory dummy frame is emitted first with return PC and metadata zeroed.
+ * For each real frame the low four flag bits are the local count, bit 4 marks a
+ * procedure/discarded-result call, and the argument mask records supplied call
+ * arguments. The frame's eval-stack count is derived from the next stack_base
+ * (or current sp for the innermost frame). IFF chunks are padded to even length.
+ */
 static int write_stks(FILE *fp, ZMachine *vm, uint32_t chunk_length)
 {
     size_t i;
@@ -235,6 +269,20 @@ static int write_stks(FILE *fp, ZMachine *vm, uint32_t chunk_length)
     return 1;
 }
 
+/*
+ * Write one full-game Quetzal save file.
+ *
+ * `saved_pc` is the continuation of the story's save opcode, not necessarily
+ * vm->pc at host completion time. IFhd identifies the exact story release,
+ * serial, checksum, and that saved continuation. UMem is an uncompressed copy
+ * of current dynamic memory. Stks contains top-level evaluation words plus all
+ * routine frames and their per-frame eval stacks.
+ *
+ * The FORM length includes the IFZS type and every chunk header/payload/padding
+ * byte, but excludes the leading "FORM" and its own length word per IFF rules.
+ * Any short write/fclose failure removes the incomplete file rather than leaving
+ * a file that might later look like a usable save.
+ */
 int zmachine_quetzal_save(ZMachine *vm,
                           const char *path,
                           uint32_t saved_pc)
@@ -299,6 +347,15 @@ int zmachine_quetzal_save(ZMachine *vm,
     return TCL_OK;
 }
 
+/*
+ * Reapply interpreter-owned header fields after loading saved dynamic memory.
+ *
+ * A saved game restores story state, but several header bytes describe the
+ * current interpreter/display capabilities and must reflect the live session.
+ * Flags 1 and Flags 2 are always retained; later versions also retain the
+ * interpreter/screen dimensions and related capability fields already populated
+ * by this runtime. All other dynamic-memory bytes come from the save image.
+ */
 static void preserve_live_header_fields(const ZMachine *vm,
                                         const uint8_t *live,
                                         uint8_t *restored)
@@ -328,6 +385,15 @@ static void preserve_live_header_fields(const ZMachine *vm,
     }
 }
 
+/*
+ * Expand a CMem payload into a complete dynamic-memory image.
+ *
+ * CMem encodes the XOR difference from the original story's dynamic memory.
+ * Nonzero bytes are XOR deltas for one address. A zero byte introduces a run of
+ * unchanged bytes whose following count byte encodes run_length-1. Starting from
+ * the pristine image and applying those deltas reconstructs the saved UMem-equivalent
+ * image while strict bounds checks reject malformed overlong runs.
+ */
 static int decode_cmem(ZMachine *vm,
                        const uint8_t *encoded,
                        size_t encoded_length,
@@ -360,6 +426,17 @@ static int decode_cmem(ZMachine *vm,
     return TCL_OK;
 }
 
+/*
+ * Parse Stks into temporary interpreter stack/frame representations.
+ *
+ * The first Quetzal frame must be the dummy top-level frame. Its eval words are
+ * copied to the bottom of stack_out but it does not become a ZMachineFrame.
+ * Each later frame is converted to an internal frame whose stack_base is the
+ * current reconstructed stack pointer before that frame's eval words are added.
+ * Locals precede eval words in each serialized frame. Reserved bits, impossible
+ * PCs, oversized stacks, and frame-count overflow are rejected before live state
+ * is touched.
+ */
 static int parse_stks(ZMachine *vm,
                       const uint8_t *data,
                       size_t length,
@@ -444,6 +521,21 @@ static int parse_stks(ZMachine *vm,
     return TCL_OK;
 }
 
+/*
+ * Restore one full-game Quetzal file transactionally.
+ *
+ * The complete file is read into memory, its FORM/IFZS envelope and padded IFF
+ * chunk boundaries are validated, and the first IFhd, UMem-or-CMem, and Stks
+ * chunks are selected. Unknown chunks are skipped as IFF permits. IFhd release,
+ * serial, and checksum must identify the currently loaded story exactly.
+ *
+ * Dynamic memory and stack/frame state are reconstructed into temporary buffers.
+ * Only after all parsing succeeds are live VM memory, evaluation stack, frames,
+ * PC, and cached header fields replaced. Host pending input is cleared and any
+ * in-memory undo point is discarded because it belongs to the pre-restore state
+ * lineage. `saved_pc` receives the IFhd continuation so zmachine_file.c can apply
+ * the version-specific restored save result/branch.
+ */
 int zmachine_quetzal_restore(ZMachine *vm,
                              const char *path,
                              uint32_t *saved_pc)
@@ -518,6 +610,7 @@ int zmachine_quetzal_restore(ZMachine *vm,
     form_end = (size_t)read_be32(file_data + 4U) + 8U;
     cursor = QUETZAL_FORM_HEADER;
 
+    /* Locate required chunks while respecting each payload's even-byte padding. */
     while (cursor < form_end) {
         const uint8_t *id;
         uint32_t chunk_length;
@@ -606,6 +699,7 @@ int zmachine_quetzal_restore(ZMachine *vm,
 
     preserve_live_header_fields(vm, vm->memory, dynamic);
 
+    /* Commit the validated temporary state atomically at the VM level. */
     memcpy(vm->memory, dynamic, vm->static_memory_addr);
     memcpy(vm->stack, stack_temp, sp_temp * sizeof(vm->stack[0]));
     memcpy(vm->frames, frames_temp,
