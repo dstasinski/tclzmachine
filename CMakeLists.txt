@@ -12,6 +12,7 @@ find_package(TCL 8.6 REQUIRED)
 set(TCLZMACHINE_VM_SOURCES
     src/zmachine.c
     src/zmachine_run.c
+    src/zmachine_preflight.c
     src/zmachine_stream.c
     src/zmachine_decode.c
     src/zmachine_mirc.c
@@ -38,8 +39,9 @@ set(TCLZMACHINE_VM_SOURCES
 
 #
 # Instruction execution is layered so each module owns one concern:
-#   zmachine_stream.c     public step/output/input boundary for external replay,
-#                        transcript, and command-record files
+#   zmachine_preflight.c  public step boundary; rejects version/arity errors
+#                        before any layer can resolve a variable operand
+#   zmachine_stream.c     external replay, transcript, and command-record files
 #   zmachine_mirc.c       optional text style/colour state and mIRC rendering
 #   zmachine_file_aux.c   V5+ auxiliary byte-region save/restore requests
 #   zmachine_file.c       full-game Quetzal file-request base layer
@@ -70,14 +72,17 @@ set_source_files_properties(src/zmachine_file_aux.c PROPERTIES
 # wrapper still owns replay accumulation and host FILE lifetimes, while the mIRC
 # layer wraps its public run/lifetime hooks so presentation output is cleared once
 # per Tcl command and story-controlled style state is reset on load/restart/reset.
-# Canonical output remains in zmachine.c; its private append implementation is
-# mirrored by zmachine_mirc.c before returning through the transcript wrapper.
+# The stream step entry point is renamed beneath zmachine_preflight.c so every
+# execution path receives version/arity checks before stream or presentation
+# policy can resolve operands. Canonical output remains in zmachine.c; its private
+# append implementation is mirrored by zmachine_mirc.c before returning through
+# the transcript wrapper.
 #
 set_source_files_properties(src/zmachine_run.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_run=zmachine_run_stream_base"
 )
 set_source_files_properties(src/zmachine_stream.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_mirc_base;zmachine_destroy=zmachine_destroy_mirc_base;zmachine_load_story=zmachine_load_story_mirc_base;zmachine_reset=zmachine_reset_mirc_base;zmachine_stream_after_restart=zmachine_stream_after_restart_mirc_base"
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_preflight_base;zmachine_run=zmachine_run_mirc_base;zmachine_destroy=zmachine_destroy_mirc_base;zmachine_load_story=zmachine_load_story_mirc_base;zmachine_reset=zmachine_reset_mirc_base;zmachine_stream_after_restart=zmachine_stream_after_restart_mirc_base"
 )
 set_source_files_properties(src/zmachine.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base;zmachine_output_append=zmachine_output_append_plain_base;zmachine_destroy=zmachine_destroy_stream_base;zmachine_load_story=zmachine_load_story_stream_base;zmachine_reset=zmachine_reset_stream_base"
@@ -188,6 +193,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(version-gate-side-effects-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(version-gate-side-effects-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME version-gate-side-effects COMMAND version-gate-side-effects-test)
+
+    add_executable(arity-side-effects-test tests/arity_side_effects.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(arity-side-effects-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(arity-side-effects-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME arity-side-effects COMMAND arity-side-effects-test)
 
     add_executable(mirc-presentation-test tests/mirc_presentation.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(mirc-presentation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
