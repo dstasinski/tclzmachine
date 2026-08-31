@@ -1,21 +1,27 @@
 /*
  * zmachine_core_extra.c
  *
- * Standards-completeness layer for ordinary control-flow and arithmetic
- * instructions which are not yet implemented in the original core executor.
+ * Standards-completeness layer for ordinary control-flow, arithmetic, and
+ * host-neutral I/O-selection instructions which are not yet implemented in the
+ * original core executor.
  *
- * This module is deliberately below the text/presentation wrapper: none of the
- * opcodes here have host, screen, IRC, or Tcl policy. It recognizes only the
- * small set it owns, resolves their operands exactly once, and delegates every
- * other instruction untouched to zmachine_exec.c. Keeping operand resolution
- * local to a handled instruction is essential because reading variable 0 pops
- * the evaluation stack.
+ * This module is deliberately below the text/presentation wrapper. It recognizes
+ * only the small set it owns, resolves their operands exactly once, and delegates
+ * every other instruction untouched to zmachine_exec.c. Keeping operand
+ * resolution local to a handled instruction is essential because reading
+ * variable 0 pops the evaluation stack.
  *
  * catch/throw use the standard frame cookie: the number of routine frames
  * currently on the system stack. throw discards newer frames, then returns from
  * the routine whose frame count was caught. Logical and arithmetic shifts avoid
  * implementation-defined signed right-shift behavior by doing all bit movement
  * in the unsigned 16-bit value domain and explicitly filling sign bits.
+ *
+ * input_stream is host-neutral in an embedded interpreter: Tcl owns the physical
+ * source of queued input, so the two standard stream numbers are accepted without
+ * introducing terminal/file policy into the VM. sound_effect is likewise
+ * consumed as an unavailable presentation effect after normal operand evaluation;
+ * the interpreter header already tells stories that sampled sound is unavailable.
  */
 
 #include "tclzmachine.h"
@@ -55,16 +61,26 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 }
 
 /*
- * Return nonzero only for the four opcode families owned by this layer.
+ * Return nonzero only for opcode families owned by this layer.
  *
- * The form check on VAR:24 is intentional: extended instructions share the
- * decoder's VAR-sized operand bucket, so opcode number 24 alone is insufficient
- * to identify the VAR-table `not` instruction.
+ * VAR-table operations require ZM_FORM_VARIABLE explicitly: extended
+ * instructions share the decoder's VAR-sized operand bucket, so an opcode
+ * number alone is never sufficient to identify a VAR instruction.
  */
 static int owns_instruction(const ZMachine *vm,
                             const ZMachineInstruction *instruction)
 {
-    if (!vm || !instruction || vm->version < 5U)
+    if (!vm || !instruction)
+        return 0;
+
+    if (vm->version >= 3U &&
+        instruction->form == ZM_FORM_VARIABLE &&
+        instruction->operand_count == ZM_OPERANDS_VAR &&
+        (instruction->opcode_number == 20U ||
+         instruction->opcode_number == 21U))
+        return 1; /* input_stream / sound_effect */
+
+    if (vm->version < 5U)
         return 0;
 
     if (instruction->operand_count == ZM_OPERANDS_0OP &&
@@ -144,7 +160,7 @@ static uint16_t arithmetic_shift(uint16_t number, int16_t places)
 /*
  * Execute one instruction through the pure-core completeness layer.
  *
- * Unrecognized instructions delegate before operand resolution. The four owned
+ * Unrecognized instructions delegate before operand resolution. Owned
  * operations are then validated and evaluated according to their exact opcode
  * contracts. The Standard leaves shifts outside -15..+15 undefined; this
  * runtime rejects them deterministically rather than invoking undefined C
@@ -173,6 +189,39 @@ int zmachine_step_core(ZMachine *vm)
         zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
+
+    if (instruction.form == ZM_FORM_VARIABLE &&
+        instruction.operand_count == ZM_OPERANDS_VAR &&
+        instruction.opcode_number == 20U) {
+        /*
+         * input_stream 0/1 selects keyboard/command-file input in a terminal
+         * interpreter. In tclzmachine the Tcl host is the source abstraction,
+         * so both standard selections are accepted while all actual characters
+         * continue to arrive through the same queued-input API.
+         */
+        if (instruction.operand_count_actual != 1U)
+            return core_extra_error(vm, "input_stream requires one operand");
+        if (values[0] > 1U)
+            return core_extra_error(vm, "invalid Z-machine input stream");
+        vm->pc = instruction.next_pc;
+        return TCL_OK;
+    }
+
+    if (instruction.form == ZM_FORM_VARIABLE &&
+        instruction.operand_count == ZM_OPERANDS_VAR &&
+        instruction.opcode_number == 21U) {
+        /*
+         * Sound is intentionally unavailable in the text-only frontend. The
+         * Standard specifically asks interpreters not to halt on the historical
+         * zero-operand sound_effect form, so every syntactically decoded form is
+         * consumed after operand evaluation. No completion callback is invoked
+         * because no asynchronous sound was started.
+         */
+        if (instruction.operand_count_actual > 4U)
+            return core_extra_error(vm, "sound_effect has too many operands");
+        vm->pc = instruction.next_pc;
+        return TCL_OK;
+    }
 
     if (instruction.operand_count == ZM_OPERANDS_0OP &&
         instruction.opcode_number == 9U) {
