@@ -1,3 +1,14 @@
+/*
+ * text.c
+ *
+ * Direct regression coverage for Z-text/ZSCII decoding independent of opcode
+ * dispatch. Hand-packed strings verify V3 alphabet shifts/newlines,
+ * abbreviation expansion and continuation addresses, V5 custom alphabets,
+ * the standard extra-ZSCII Unicode table, story-defined Unicode mappings, safe
+ * fallback for undefined entries, and the distinction between UTF-8 stream-1
+ * rendering and raw ZSCII bytes captured by memory stream 3.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_text.h"
 
@@ -6,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocate a writable synthetic story image with normal stream 1 selected. */
 static void init_vm(ZMachine *vm, uint8_t version, size_t size)
 {
     memset(vm, 0, sizeof(*vm));
@@ -20,6 +32,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     Tcl_DStringInit(&vm->pending_input);
 }
 
+/* Release allocations and Tcl strings initialized by init_vm(). */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -27,12 +40,14 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
+/* Write one packed Z-text/story word in big-endian order. */
 static void put_word(uint8_t *memory, size_t address, uint16_t word)
 {
     memory[address] = (uint8_t)(word >> 8);
     memory[address + 1U] = (uint8_t)word;
 }
 
+/* Pack three 5-bit Z-characters and optionally set the terminating high bit. */
 static uint16_t zword(unsigned a, unsigned b, unsigned c, int last)
 {
     return (uint16_t)((last ? 0x8000U : 0U) |
@@ -43,6 +58,7 @@ static uint16_t zword(unsigned a, unsigned b, unsigned c, int last)
 
 int main(void)
 {
+    /* Basic packed-text decoding and returned byte continuation. */
     {
         ZMachine vm;
         uint32_t next;
@@ -57,6 +73,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V3 temporary alphabet shifts plus the A2 newline entry. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
@@ -69,6 +86,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V3 abbreviation lookup expands recursively, then returns to outer text. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
@@ -84,6 +102,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V5 custom alphabet table overrides the default A0/A1/A2 characters. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -101,6 +120,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Pre-V5 stories always use the standard default extra-character table. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
@@ -113,6 +133,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V5 story-defined Unicode mapping and raw stream-3 ZSCII preservation. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
