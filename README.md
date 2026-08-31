@@ -43,6 +43,7 @@ The runtime now contains a working execution core rather than only starter scaff
 - standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
 - cooperative `read` and `read_char` suspension/resumption, including V5+ preloaded line-input buffers
 - printable-ASCII host line validation plus exact numeric ZSCII key input for `read_char` and V5+ terminating-character-table line completion
+- Z-machine input stream 1 command replay, output stream 2 transcript files, and output stream 4 command/key recording through host-selected paths
 - dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`, including custom alphabet tables and standard lowercase dictionary encryption
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
@@ -52,7 +53,7 @@ The runtime now contains a working execution core rather than only starter scaff
 - V5+ operand-bearing auxiliary save/restore byte-region files
 - Quetzal UMem writing plus UMem and compressed CMem restore support
 - optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, auxiliary files, presentation, tokenization, wrapping, and operand-side-effect behavior
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, external/auxiliary files, presentation, tokenization, wrapping, and operand-side-effect behavior
 - repository-owned V3 and V5 end-to-end Tcl integration stories, including full-game save/restore
 - manual real-story compatibility probes
 
@@ -89,7 +90,7 @@ set response [zmachine::command game1 "look"]
 puts $response
 ```
 
-The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore filename, halts, or encounters an error.
+The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore or external stream filename, halts, or encounters an error.
 
 Use `zmachine::key` to supply one exact numeric ZSCII keyboard event when the story is waiting for character input:
 
@@ -114,7 +115,13 @@ puts $info
 
 `inputRequest` is empty when no cooperative input is pending, `line` while the session is suspended on `read`/`sread`/`aread`, and `char` while it is suspended on `read_char`. This lets an embedding bot choose between `zmachine::command` and `zmachine::key` without decoding VM instructions itself.
 
-`fileRequest` in that dictionary is empty during ordinary play and becomes `save` or `restore` when the story has yielded for host file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
+External Z-machine stream state is reported through:
+
+- `streamRequest` - empty normally, or `replay`, `transcript`, or `record` while the story is waiting for a host path
+- `inputStream` - `0` for interactive Tcl input or `1` while command-file replay is selected
+- `commandRecording` - boolean indicating whether output stream 4 is currently recording commands/key presses
+
+`fileRequest` is independent of those stream fields. It is empty during ordinary play and becomes `save` or `restore` when the story has yielded for save/restore file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
 
 For auxiliary requests, the same dictionary also exposes:
 
@@ -123,7 +130,44 @@ For auxiliary requests, the same dictionary also exposes:
 - `fileTable` - the story-memory address of the byte region
 - `fileBytes` - the requested maximum byte count
 
-The embedding application remains responsible for translating the suggestion into an actual safe host path.
+The embedding application remains responsible for translating all filename requests into safe host paths.
+
+### Command replay, transcript, and recording streams
+
+Z-machine command/replay and transcript filenames are host policy just like saved-game filenames. When a story first selects input stream 1, output stream 2, or output stream 4 and no path has been configured yet, execution yields and `streamRequest` identifies the needed file. Supply it with:
+
+```tcl
+set info [zmachine::info game1]
+set request [dict get $info streamRequest]
+
+switch -- $request {
+    replay {
+        set more [zmachine::streamfile game1 replay /safe/path/commands.txt]
+    }
+    transcript {
+        set more [zmachine::streamfile game1 transcript /safe/path/transcript.txt]
+    }
+    record {
+        set more [zmachine::streamfile game1 record /safe/path/commands.out]
+    }
+}
+```
+
+`zmachine::streamfile` may also be called before a story selects a stream to preconfigure its path. Once a transcript or command-recording file has been chosen, deselecting and reselecting that stream reuses the same open file rather than asking the host for a filename repeatedly. `zmachine::cancel game1` declines a pending stream request and lets execution continue with that external stream unselected.
+
+Input stream 1 automatically feeds command records while the story is waiting on `read` or `read_char`. At end of file, replay closes and input returns to stream 0 so Tcl can resume interactive input.
+
+Output stream 4 and input stream 1 share a simple human-readable command format compatible with the Standard's suggested `[N]` convention:
+
+```text
+look
+turn it on.[154]
+[129]
+```
+
+The first line is an ordinary Enter-terminated command. The second is a line terminated by ZSCII function key `154`. A line containing only `[129]` represents an exact `read_char` keypress. Output stream 4 writes a completed command in one operation after input finishes; exact `read_char` keys are written as their numeric marker.
+
+When transcript stream 2 is active, story output is copied to its UTF-8 host file and V1-V5 completed line input is echoed there. While output stream 3 is active, its standard exclusive-output behavior suppresses story text from the other selected output streams. The Tcl/IRC frontend does not echo a player's command back into the returned response because the chat transport already displays the user's message; that screen-side input echo remains frontend presentation policy.
 
 ### Save/restore handshake
 
@@ -181,7 +225,7 @@ zmachine::destroy game1
 
 ## IRC-oriented output wrapping
 
-Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, and file-request completion calls apply the configured session limit only while returning that text to Tcl.
+Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, stream/file-request completion calls apply the configured session limit only while returning that text to Tcl.
 
 The wrapper:
 
@@ -311,7 +355,7 @@ A game session remains resident as one native VM instance:
 IRC/Tcl -> one input line/key -> VM executes -> next input/file request -> Tcl
 ```
 
-IRC framing, flood control, user ownership, authentication, save-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
+IRC framing, flood control, user ownership, authentication, save/stream-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
 
 ## Licensing
 
