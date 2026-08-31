@@ -14,6 +14,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_run.c
     src/zmachine_stream.c
     src/zmachine_decode.c
+    src/zmachine_mirc.c
     src/zmachine_dispatch.c
     src/zmachine_key.c
     src/zmachine_core_extra.c
@@ -37,13 +38,14 @@ set(TCLZMACHINE_VM_SOURCES
 
 #
 # Instruction execution is layered so each module owns one concern:
-#   zmachine_stream.c     public step/run/output/input boundary for external
-#                        replay, transcript, and command-record files
+#   zmachine_stream.c     public step/output/input boundary for external replay,
+#                        transcript, and command-record files
+#   zmachine_mirc.c       optional text style/colour state and mIRC rendering
 #   zmachine_file_aux.c   V5+ auxiliary byte-region save/restore requests
 #   zmachine_file.c       full-game Quetzal file-request base layer
 #   zmachine_tokenise.c   non-blocking lexical analysis opcodes
 #   zmachine_key.c        exact numeric ZSCII input for read_char
-#   zmachine_dispatch.c   presentation/text-only compatibility wrapper
+#   zmachine_dispatch.c   remaining text-only compatibility wrapper
 #   zmachine_core_extra.c pure control/arithmetic completeness opcodes
 #   zmachine_exec.c       original ordinary core opcode executor
 # The lower implementations are renamed at compile time so each wrapper can
@@ -54,7 +56,7 @@ set_source_files_properties(src/zmachine_exec.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_core_base"
 )
 set_source_files_properties(src/zmachine_dispatch.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_present"
+    COMPILE_DEFINITIONS "zmachine_step=zmachine_step_visual_base"
 )
 set_source_files_properties(src/zmachine_file.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_step=zmachine_step_file_base;zmachine_save_file=zmachine_save_file_base;zmachine_restore_file=zmachine_restore_file_base;zmachine_cancel_file=zmachine_cancel_file_base"
@@ -64,17 +66,21 @@ set_source_files_properties(src/zmachine_file_aux.c PROPERTIES
 )
 
 #
-# The form-aware cooperative loop lives in zmachine_run.c. The stream wrapper
-# becomes the public run function so replay input can feed multiple cooperative
-# turns without exposing command-file mechanics to the ordinary run loop.
-# Story lifetime and canonical output remain in zmachine.c under private symbols
-# which the stream layer wraps to own FILE lifetimes and transcript output.
+# The form-aware cooperative loop lives in zmachine_run.c. The external stream
+# wrapper still owns replay accumulation and host FILE lifetimes, while the mIRC
+# layer wraps its public run/lifetime hooks so presentation output is cleared once
+# per Tcl command and story-controlled style state is reset on load/restart/reset.
+# Canonical output remains in zmachine.c; its private append implementation is
+# mirrored by zmachine_mirc.c before returning through the transcript wrapper.
 #
 set_source_files_properties(src/zmachine_run.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_run=zmachine_run_stream_base"
 )
+set_source_files_properties(src/zmachine_stream.c PROPERTIES
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_mirc_base;zmachine_destroy=zmachine_destroy_mirc_base;zmachine_load_story=zmachine_load_story_mirc_base;zmachine_reset=zmachine_reset_mirc_base;zmachine_stream_after_restart=zmachine_stream_after_restart_mirc_base"
+)
 set_source_files_properties(src/zmachine.c PROPERTIES
-    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base;zmachine_output_append=zmachine_output_append_stream_base;zmachine_destroy=zmachine_destroy_stream_base;zmachine_load_story=zmachine_load_story_stream_base;zmachine_reset=zmachine_reset_stream_base"
+    COMPILE_DEFINITIONS "zmachine_run=zmachine_run_legacy;zmachine_supply_input=zmachine_supply_input_base;zmachine_output_append=zmachine_output_append_plain_base;zmachine_destroy=zmachine_destroy_stream_base;zmachine_load_story=zmachine_load_story_stream_base;zmachine_reset=zmachine_reset_stream_base"
 )
 
 #
@@ -182,6 +188,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(version-gate-side-effects-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(version-gate-side-effects-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME version-gate-side-effects COMMAND version-gate-side-effects-test)
+
+    add_executable(mirc-presentation-test tests/mirc_presentation.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(mirc-presentation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(mirc-presentation-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME mirc-presentation COMMAND mirc-presentation-test)
 
     add_executable(io-compat-test tests/io_compat.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(io-compat-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
