@@ -25,6 +25,7 @@ extern "C" {
 #define TCLZMACHINE_VERSION "0.2.0"
 #define TCLZMACHINE_TEXT_ONLY 1
 #define ZM_MAX_STREAM3_DEPTH 16U
+#define ZM_AUX_FILENAME_MAX 12U
 
 /* Opaque heap-owned cache used only after a story requests save_undo. */
 typedef struct ZMachineUndoState ZMachineUndoState;
@@ -39,6 +40,19 @@ typedef enum ZMachineRunState {
     ZM_STATE_WAITING_SAVE,
     ZM_STATE_WAITING_RESTORE
 } ZMachineRunState;
+
+/*
+ * Kind of host-file request currently suspended at the Tcl boundary.
+ *
+ * FULL requests serialize/restore complete game state through Quetzal.
+ * AUXILIARY requests transfer only a story-selected byte region and are not
+ * part of the state of play. NONE is used whenever no file opcode is pending.
+ */
+typedef enum ZMachineFileRequestKind {
+    ZM_FILE_REQUEST_NONE = 0,
+    ZM_FILE_REQUEST_FULL,
+    ZM_FILE_REQUEST_AUXILIARY
+} ZMachineFileRequestKind;
 
 /*
  * Complete per-session interpreter state. No ordinary VM state is global;
@@ -84,11 +98,21 @@ struct ZMachine {
     size_t frame_count;
 
     /*
-     * Quetzal save/restore opcodes yield to Tcl for filename policy. The saved
-     * address points at the save/restore branch record in V1-V3 or store byte
-     * in V4+, exactly as required for completing the opcode after host I/O.
+     * Cooperative save/restore state retained while Tcl chooses a path.
+     *
+     * pending_file_pc points at the save/restore store or branch continuation.
+     * For auxiliary V5+ EXT:0/EXT:1 requests, table/bytes identify the memory
+     * transfer, suggested_name is the normalized story-supplied 8.3-style name,
+     * and prompt is -1 when omitted, 0 for silent use, or 1 when the story asks
+     * the host to confirm the filename. Full Quetzal requests leave the
+     * auxiliary fields zero/empty.
      */
     uint32_t pending_file_pc;
+    ZMachineFileRequestKind pending_file_kind;
+    uint16_t pending_file_table;
+    uint16_t pending_file_bytes;
+    int pending_file_prompt;
+    char pending_file_name[ZM_AUX_FILENAME_MAX + 1U];
 
     /* Per-session pseudo-random generator state used by the random opcode. */
     uint32_t random_state;
