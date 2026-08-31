@@ -7,9 +7,9 @@
  * Tcl supplies an entire command line at once. The `read` path converts that
  * line into the exact text-buffer representation expected by the active
  * Z-machine version, including the Standard-mandated lower-case folding before
- * storage and lexical analysis. The same lexical engine is also exposed to the
- * V5+ `tokenise` and `encode_text` opcodes, but those operations act on ZSCII
- * already present in story memory and therefore preserve its case exactly.
+ * storage and lexical analysis. V5+ `tokenise` and `encode_text` operate on
+ * ZSCII already present in story memory, but dictionary encryption itself still
+ * follows S 3.7 and lowercases text before producing the fixed Z-character key.
  * It intentionally contains no terminal, filesystem, or IRC behavior.
  *
  * Story buffers are validated before mutation. This matters for malformed
@@ -115,10 +115,11 @@ static int custom_alphabet_address(const ZMachine *vm, uint16_t *address)
 /*
  * Find one ZSCII byte in the version's default alphabet table.
  *
- * Lower-case letters occupy A0 and upper-case letters occupy the same positions
- * in A1. A2 differs in V1: with no newline entry, digit zero begins at
- * Z-character 7; in V2+ digit zero begins at Z-character 8 because A2/7 is
- * newline. A2/6 is always the 10-bit ZSCII escape and is never a table glyph.
+ * A0 contains lower-case letters. Dictionary encryption lowercases before this
+ * lookup, so ordinary default-table encryption does not need A1. A2 differs in
+ * V1: with no newline entry, digit zero begins at Z-character 7; in V2+ digit
+ * zero begins at Z-character 8 because A2/7 is newline. A2/6 is always the
+ * 10-bit ZSCII escape and is never a table glyph.
  */
 static int default_alphabet_index(uint8_t version,
                                   unsigned char c,
@@ -129,10 +130,6 @@ static int default_alphabet_index(uint8_t version,
     if (c >= 'a' && c <= 'z') {
         *zchar = (uint8_t)(6U + (c - 'a'));
         return 0;
-    }
-    if (c >= 'A' && c <= 'Z') {
-        *zchar = (uint8_t)(6U + (c - 'A'));
-        return 1;
     }
 
     if (version == 1U) {
@@ -155,12 +152,12 @@ static int default_alphabet_index(uint8_t version,
 }
 
 /*
- * Find one ZSCII byte in the active story alphabet table.
+ * Find one lower-case ZSCII byte in the active story alphabet table.
  *
  * Custom tables exist only in V5+. Search A0 first so a directly representable
- * character gets the shortest encoding, then A1 and A2. Entries 6 and 7 of A2
- * remain the escape and newline controls even when bytes are present in those
- * two table positions, so they are deliberately skipped during lookup.
+ * character gets the shortest encoding, then A1 and A2. A1 can still matter in
+ * a custom table because a story may place lower-case characters there. Entries
+ * 6 and 7 of A2 remain the escape and newline controls and are skipped.
  */
 static int alphabet_index(const ZMachine *vm,
                           uint16_t custom_table,
@@ -214,17 +211,16 @@ static uint8_t v12_shift_code(int current, int target, int lock)
  * Encode bytes into the fixed-width dictionary key format.
  *
  * V1-V3 dictionaries compare six Z-characters (four bytes); V4+ compare nine
- * Z-characters (six bytes). The bytes supplied here are encoded exactly as
- * given: `read` performs its required lower-case conversion before calling the
- * tokenizer, while `tokenise` and `encode_text` must preserve story-memory case.
- * Abbreviations are never used, padding is Z-character 5, and an incomplete
- * shift/escape construction is retained if the fixed dictionary resolution
+ * Z-characters (six bytes). S 3.7 requires text being encrypted as a dictionary
+ * word to be converted to lower case; this applies both to parser lookup and to
+ * `encode_text`, whose opcode contract says to encode as if it were a dictionary
+ * entry. Abbreviations are never used, padding is Z-character 5, and an
+ * incomplete shift/escape construction is retained if dictionary resolution
  * cuts it off.
  *
- * V5+ custom alphabet tables are honored for dictionary encryption just as they
- * are for text decoding. In V1/V2 the persistent alphabet state is tracked so
- * the required shift-lock optimization is used when the current and following
- * input characters both belong to the same non-current alphabet.
+ * V5+ custom alphabet tables are honored for dictionary encryption. In V1/V2
+ * persistent alphabet state is tracked so the required shift-lock optimization
+ * is used when two following lower-case/encrypted characters share an alphabet.
  */
 static int encode_dictionary_word(const ZMachine *vm,
                                   const uint8_t *word,
@@ -251,7 +247,7 @@ static int encode_dictionary_word(const ZMachine *vm,
     memset(zchars, 5, sizeof(zchars));
 
     for (i = 0U; i < word_len && zi < zmax; ++i) {
-        unsigned char c = word[i];
+        unsigned char c = (unsigned char)tolower((unsigned char)word[i]);
         uint8_t zchar = 0U;
         int alphabet;
         uint8_t sequence[4];
@@ -271,7 +267,8 @@ static int encode_dictionary_word(const ZMachine *vm,
                 int lock = 0;
 
                 if (i + 1U < word_len) {
-                    unsigned char next = word[i + 1U];
+                    unsigned char next =
+                        (unsigned char)tolower((unsigned char)word[i + 1U]);
                     uint8_t next_zchar;
                     int next_alphabet = next == (unsigned char)' ' ? -1 :
                         alphabet_index(vm, custom_table, next, &next_zchar);
@@ -397,7 +394,7 @@ static int dictionary_lookup(const ZMachine *vm,
     return TCL_OK;
 }
 
-/* Fold a host-entered read byte to lower case; story-memory lexical bytes do not. */
+/* Fold separator scanning only when the read opcode has lowercased host input. */
 static unsigned char lexical_byte(unsigned char c, int fold_lowercase)
 {
     return fold_lowercase ? (unsigned char)tolower(c) : c;
@@ -506,9 +503,10 @@ static int validate_parse_buffer(const ZMachine *vm,
  * text buffer. text_offset is 1 in V1-V4 and 2 in V5+ because the physical
  * text-buffer layouts differ between those version families.
  *
- * `fold_lowercase` is true only for host input consumed by `read`, whose opcode
- * contract requires case folding. `tokenise` passes false so arbitrary ZSCII
- * already placed in a story text buffer is encrypted without alteration.
+ * `fold_lowercase` affects delimiter comparison and token bytes before lookup;
+ * dictionary_lookup then applies S 3.7 lowercasing again defensively. `read`
+ * passes true because it owns case folding of host input; `tokenise` passes false
+ * so separator recognition reflects the existing story-memory text exactly.
  *
  * When preserve_unrecognized is true, an unknown word leaves all four bytes of
  * its existing parse slot untouched while still incrementing the token count.
@@ -650,7 +648,7 @@ int zmachine_input_read_line(ZMachine *vm,
                               vm->dictionary_addr, 1) != TCL_OK)
         return TCL_ERROR;
 
-    /* `read` stores and parses a lower-case copy of the host-entered command. */
+    /* `read` stores a lower-case copy of the host-entered command. */
     for (i = 0U; i < len; ++i) {
         unsigned char c = lexical_byte((unsigned char)line[i], 1);
         if (write_byte(vm, (uint32_t)text_buffer + offset + (uint32_t)i,
@@ -682,7 +680,7 @@ int zmachine_input_read_line(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Tokenize text already stored in a Version 5+ text buffer without case folding. */
+/* Tokenize text already stored in a Version 5+ text buffer. */
 int zmachine_input_tokenize_buffer(ZMachine *vm,
                                    uint16_t text_buffer,
                                    uint16_t parse_buffer,
@@ -714,7 +712,7 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
                     preserve_unrecognized != 0, 0);
 }
 
-/* Encode an explicit V5+ ZSCII memory slice exactly as supplied. */
+/* Encode an explicit V5+ ZSCII memory slice as a dictionary key. */
 int zmachine_input_encode_text(ZMachine *vm,
                                uint16_t zscii_text,
                                uint16_t length,
