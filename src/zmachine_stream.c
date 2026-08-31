@@ -1,0 +1,717 @@
+/*
+ * zmachine_stream.c
+ *
+ * External command/replay and transcript stream support for the embedded
+ * Z-machine runtime.
+ *
+ * Z-machine input stream 1 reads commands from a host file whose format is the
+ * same as output stream 4. Output stream 2 receives story text plus completed
+ * line input, while output stream 4 records completed commands and read_char
+ * keypresses. The Z-machine deliberately does not choose host filenames, so a
+ * first selection of one of these streams yields with
+ * ZM_STATE_WAITING_STREAM_FILE; Tcl then supplies a path through
+ * zmachine_stream_file().
+ *
+ * Command files use the standards-suggested textual convention. Ordinary line
+ * commands occupy one physical line. A non-Enter terminating key is appended as
+ * [N], and read_char events are written as a line containing [N]. This makes the
+ * writer and replay reader exactly round-trip compatible while remaining easy
+ * to inspect and edit by hand.
+ */
+
+#include "tclzmachine.h"
+#include "zmachine_decode.h"
+#include "zmachine_exec.h"
+#include "zmachine_stream.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Public implementations immediately below this host-stream wrapper. */
+extern int zmachine_step_stream_base(ZMachine *vm);
+extern int zmachine_run_stream_base(ZMachine *vm);
+extern void zmachine_output_append_stream_base(ZMachine *vm,
+                                                const char *text,
+                                                size_t len);
+extern int zmachine_input_read_line_stream_base(ZMachine *vm,
+                                                 uint16_t text_buffer,
+                                                 uint16_t parse_buffer,
+                                                 uint16_t *terminator);
+extern void zmachine_destroy_stream_base(ZMachine *vm);
+extern int zmachine_load_story_stream_base(ZMachine *vm, const char *path);
+extern int zmachine_reset_stream_base(ZMachine *vm);
+
+typedef enum StreamRequestKind {
+    STREAM_REQUEST_NONE = 0,
+    STREAM_REQUEST_REPLAY,
+    STREAM_REQUEST_TRANSCRIPT,
+    STREAM_REQUEST_RECORD
+} StreamRequestKind;
+
+struct ZMachineStreamIO {
+    FILE *replay;
+    FILE *transcript;
+    FILE *record;
+    uint8_t input_stream;
+    int record_selected;
+    StreamRequestKind pending_request;
+    uint32_t pending_next_pc;
+};
+
+/* Record an API/file diagnostic without poisoning a retryable VM session. */
+static int stream_api_error(ZMachine *vm, const char *message)
+{
+    if (vm)
+        snprintf(vm->error, sizeof(vm->error), "%s",
+                 message ? message : "stream file operation failed");
+    return TCL_ERROR;
+}
+
+/* Malformed executing Z-code is terminal, unlike a host filename error. */
+static int stream_vm_error(ZMachine *vm, const char *message)
+{
+    if (vm) {
+        vm->state = ZM_STATE_ERROR;
+        snprintf(vm->error, sizeof(vm->error), "%s",
+                 message ? message : "invalid Z-machine stream operation");
+    }
+    return TCL_ERROR;
+}
+
+static ZMachineStreamIO *ensure_stream_io(ZMachine *vm)
+{
+    if (!vm)
+        return NULL;
+    if (!vm->stream_io)
+        vm->stream_io = (ZMachineStreamIO *)calloc(1U, sizeof(*vm->stream_io));
+    return vm->stream_io;
+}
+
+static void close_file(FILE **fp)
+{
+    if (fp && *fp) {
+        fclose(*fp);
+        *fp = NULL;
+    }
+}
+
+static void close_stream_io(ZMachine *vm)
+{
+    ZMachineStreamIO *io;
+
+    if (!vm || !vm->stream_io)
+        return;
+    io = vm->stream_io;
+    close_file(&io->replay);
+    close_file(&io->transcript);
+    close_file(&io->record);
+    free(io);
+    vm->stream_io = NULL;
+}
+
+static int stream2_selected(const ZMachine *vm)
+{
+    if (!vm || !vm->memory || vm->memory_size <= 0x11U)
+        return 0;
+    return (vm->memory[0x11U] & 0x01U) != 0U;
+}
+
+static void select_stream2(ZMachine *vm, int selected)
+{
+    uint16_t flags;
+
+    if (!vm || !vm->memory || vm->memory_size <= 0x11U)
+        return;
+    flags = (uint16_t)(((uint16_t)vm->memory[0x10U] << 8) |
+                       vm->memory[0x11U]);
+    if (selected)
+        flags |= 0x0001U;
+    else
+        flags &= (uint16_t)~0x0001U;
+    vm->memory[0x10U] = (uint8_t)(flags >> 8);
+    vm->memory[0x11U] = (uint8_t)flags;
+    vm->flags2 = flags;
+}
+
+static const char *request_name(StreamRequestKind kind)
+{
+    switch (kind) {
+    case STREAM_REQUEST_REPLAY:
+        return "replay";
+    case STREAM_REQUEST_TRANSCRIPT:
+        return "transcript";
+    case STREAM_REQUEST_RECORD:
+        return "record";
+    default:
+        return "";
+    }
+}
+
+static StreamRequestKind request_from_name(const char *name)
+{
+    if (!name)
+        return STREAM_REQUEST_NONE;
+    if (strcmp(name, "replay") == 0)
+        return STREAM_REQUEST_REPLAY;
+    if (strcmp(name, "transcript") == 0)
+        return STREAM_REQUEST_TRANSCRIPT;
+    if (strcmp(name, "record") == 0)
+        return STREAM_REQUEST_RECORD;
+    return STREAM_REQUEST_NONE;
+}
+
+static int begin_request(ZMachine *vm, StreamRequestKind kind,
+                         uint32_t next_pc)
+{
+    ZMachineStreamIO *io = ensure_stream_io(vm);
+
+    if (!io)
+        return stream_vm_error(vm, "out of memory while selecting external stream");
+    io->pending_request = kind;
+    io->pending_next_pc = next_pc;
+    vm->state = ZM_STATE_WAITING_STREAM_FILE;
+    return TCL_OK;
+}
+
+const char *zmachine_pending_stream_request(const ZMachine *vm)
+{
+    return (vm && vm->stream_io) ?
+           request_name(vm->stream_io->pending_request) : "";
+}
+
+int zmachine_current_input_stream(const ZMachine *vm)
+{
+    return (vm && vm->stream_io) ? vm->stream_io->input_stream : 0;
+}
+
+int zmachine_command_recording_selected(const ZMachine *vm)
+{
+    return vm && vm->stream_io && vm->stream_io->record_selected;
+}
+
+/* Open/configure one host stream and, when applicable, resume its opcode. */
+int zmachine_stream_file(ZMachine *vm, const char *kind_name, const char *path)
+{
+    StreamRequestKind kind;
+    ZMachineStreamIO *io;
+    FILE *fp;
+    const char *mode;
+
+    if (!vm || !path || !path[0])
+        return stream_api_error(vm, "invalid stream file path");
+    kind = request_from_name(kind_name);
+    if (kind == STREAM_REQUEST_NONE)
+        return stream_api_error(vm, "stream file kind must be replay, transcript, or record");
+
+    io = ensure_stream_io(vm);
+    if (!io)
+        return stream_api_error(vm, "out of memory while configuring stream file");
+    if (io->pending_request != STREAM_REQUEST_NONE &&
+        io->pending_request != kind)
+        return stream_api_error(vm, "stream file kind does not match the pending request");
+
+    mode = kind == STREAM_REQUEST_REPLAY ? "rb" : "wb";
+    fp = fopen(path, mode);
+    if (!fp)
+        return stream_api_error(vm, "unable to open requested stream file");
+
+    if (kind == STREAM_REQUEST_REPLAY) {
+        close_file(&io->replay);
+        io->replay = fp;
+    } else if (kind == STREAM_REQUEST_TRANSCRIPT) {
+        close_file(&io->transcript);
+        io->transcript = fp;
+    } else {
+        close_file(&io->record);
+        io->record = fp;
+    }
+
+    if (io->pending_request == kind) {
+        if (kind == STREAM_REQUEST_REPLAY)
+            io->input_stream = 1U;
+        else if (kind == STREAM_REQUEST_TRANSCRIPT)
+            select_stream2(vm, 1);
+        else
+            io->record_selected = 1;
+
+        vm->pc = io->pending_next_pc;
+        io->pending_request = STREAM_REQUEST_NONE;
+        io->pending_next_pc = 0U;
+        vm->state = ZM_STATE_READY;
+    }
+
+    vm->error[0] = '\0';
+    return TCL_OK;
+}
+
+int zmachine_cancel_stream_file(ZMachine *vm)
+{
+    ZMachineStreamIO *io;
+
+    if (!vm || !vm->stream_io ||
+        vm->stream_io->pending_request == STREAM_REQUEST_NONE ||
+        vm->state != ZM_STATE_WAITING_STREAM_FILE)
+        return stream_api_error(vm, "no external stream file request is pending");
+
+    io = vm->stream_io;
+    if (io->pending_request == STREAM_REQUEST_REPLAY)
+        io->input_stream = 0U;
+    else if (io->pending_request == STREAM_REQUEST_TRANSCRIPT)
+        select_stream2(vm, 0);
+    else if (io->pending_request == STREAM_REQUEST_RECORD)
+        io->record_selected = 0;
+
+    vm->pc = io->pending_next_pc;
+    io->pending_request = STREAM_REQUEST_NONE;
+    io->pending_next_pc = 0U;
+    vm->state = ZM_STATE_READY;
+    vm->error[0] = '\0';
+    return TCL_OK;
+}
+
+/* Write bytes to an external stream and turn host I/O failures into VM errors. */
+static int write_external(ZMachine *vm, FILE *fp,
+                          const void *data, size_t len,
+                          const char *what)
+{
+    if (!fp || len == 0U)
+        return TCL_OK;
+    if (fwrite(data, 1U, len, fp) != len || fflush(fp) != 0)
+        return stream_vm_error(vm, what);
+    return TCL_OK;
+}
+
+static int write_decimal_marker(ZMachine *vm, FILE *fp, uint16_t value)
+{
+    char marker[16];
+    int length = snprintf(marker, sizeof(marker), "[%u]", (unsigned)value);
+
+    if (length < 0 || (size_t)length >= sizeof(marker))
+        return stream_vm_error(vm, "unable to format command-file key record");
+    return write_external(vm, fp, marker, (size_t)length,
+                          "unable to write command recording file");
+}
+
+/* Record one completed read command and echo it to transcript stream 2. */
+static int note_line_input(ZMachine *vm, uint16_t text_buffer,
+                           uint16_t terminator)
+{
+    ZMachineStreamIO *io = vm ? vm->stream_io : NULL;
+    const uint8_t *text;
+    size_t length = 0U;
+    size_t start;
+
+    if (!vm || !vm->memory)
+        return TCL_ERROR;
+
+    if (vm->version <= 4U) {
+        start = (size_t)text_buffer + 1U;
+        while (start + length < vm->memory_size &&
+               vm->memory[start + length] != 0U)
+            ++length;
+    } else {
+        if ((size_t)text_buffer + 1U >= vm->memory_size)
+            return TCL_ERROR;
+        start = (size_t)text_buffer + 2U;
+        length = vm->memory[(size_t)text_buffer + 1U];
+    }
+    if (start + length > vm->memory_size)
+        return TCL_ERROR;
+    text = vm->memory + start;
+
+    /*
+     * IRC itself already displays the player's command, so stream 1 echo is a
+     * host-presentation responsibility rather than being duplicated in the Tcl
+     * response. Stream 2 still receives the standard transcript echo.
+     */
+    if (io && io->transcript && stream2_selected(vm) && vm->stream3_depth == 0U) {
+        static const char newline = '\n';
+        if (write_external(vm, io->transcript, text, length,
+                           "unable to write transcript file") != TCL_OK ||
+            write_external(vm, io->transcript, &newline, 1U,
+                           "unable to write transcript file") != TCL_OK)
+            return TCL_ERROR;
+    }
+
+    if (io && io->record && io->record_selected) {
+        static const char newline = '\n';
+        if (write_external(vm, io->record, text, length,
+                           "unable to write command recording file") != TCL_OK)
+            return TCL_ERROR;
+        if (terminator != 13U &&
+            write_decimal_marker(vm, io->record, terminator) != TCL_OK)
+            return TCL_ERROR;
+        if (write_external(vm, io->record, &newline, 1U,
+                           "unable to write command recording file") != TCL_OK)
+            return TCL_ERROR;
+    }
+
+    return TCL_OK;
+}
+
+static int note_key_input(ZMachine *vm, uint16_t zscii)
+{
+    ZMachineStreamIO *io = vm ? vm->stream_io : NULL;
+    static const char newline = '\n';
+
+    if (!io || !io->record || !io->record_selected)
+        return TCL_OK;
+    if (write_decimal_marker(vm, io->record, zscii) != TCL_OK)
+        return TCL_ERROR;
+    return write_external(vm, io->record, &newline, 1U,
+                          "unable to write command recording file");
+}
+
+/* Find a standards-style trailing [N] key marker and remove it from the line. */
+static int parse_trailing_marker(char *line, uint16_t *value, int *present)
+{
+    size_t len;
+    char *open;
+    unsigned long parsed = 0UL;
+    char *p;
+
+    *present = 0;
+    if (!line || !value)
+        return 0;
+    len = strlen(line);
+    if (len < 3U || line[len - 1U] != ']')
+        return 1;
+
+    open = strrchr(line, '[');
+    if (!open || open == line + len - 2U)
+        return 1;
+    for (p = open + 1; p < line + len - 1U; ++p) {
+        if (!isdigit((unsigned char)*p))
+            return 1;
+        parsed = parsed * 10UL + (unsigned long)(*p - '0');
+        if (parsed > 255UL)
+            return 0;
+    }
+
+    *open = '\0';
+    *value = (uint16_t)parsed;
+    *present = 1;
+    return 1;
+}
+
+static int current_input_opcode(const ZMachine *vm,
+                                ZMachineInstruction *instruction)
+{
+    char decode_error[128];
+
+    if (!vm || !vm->memory || vm->state != ZM_STATE_WAITING_INPUT)
+        return 0;
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, instruction,
+                                     decode_error, sizeof(decode_error)))
+        return 0;
+    if (instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return 0;
+    return instruction->opcode_number == 4U ||
+           instruction->opcode_number == 22U;
+}
+
+/* Queue the next replay record for the currently suspended read/read_char. */
+static int prepare_replay_input(ZMachine *vm)
+{
+    ZMachineStreamIO *io;
+    ZMachineInstruction instruction;
+    char line[4096];
+    size_t len;
+    uint16_t marker = 13U;
+    int has_marker = 0;
+    size_t i;
+
+    if (!vm || !vm->stream_io || vm->stream_io->input_stream != 1U)
+        return 0;
+    io = vm->stream_io;
+    if (!io->replay) {
+        io->input_stream = 0U;
+        return 0;
+    }
+    if (!current_input_opcode(vm, &instruction))
+        return stream_vm_error(vm, "command replay reached an unknown input wait");
+
+    if (!fgets(line, (int)sizeof(line), io->replay)) {
+        if (ferror(io->replay))
+            return stream_vm_error(vm, "unable to read command replay file");
+        close_file(&io->replay);
+        io->input_stream = 0U;
+        return 0; /* EOF returns input control to the keyboard host. */
+    }
+
+    len = strlen(line);
+    if (len == sizeof(line) - 1U && line[len - 1U] != '\n')
+        return stream_vm_error(vm, "command replay line is too long");
+    while (len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r'))
+        line[--len] = '\0';
+
+    if (!parse_trailing_marker(line, &marker, &has_marker))
+        return stream_vm_error(vm, "invalid numeric marker in command replay file");
+
+    if (instruction.opcode_number == 22U) {
+        uint16_t key;
+        if (has_marker && line[0] == '\0') {
+            key = marker;
+        } else if (!has_marker && strlen(line) == 1U &&
+                   (unsigned char)line[0] >= 32U &&
+                   (unsigned char)line[0] <= 126U) {
+            key = (uint8_t)line[0];
+        } else {
+            return stream_vm_error(vm,
+                                   "read_char replay record must contain one character or [N]");
+        }
+        return zmachine_supply_key(vm, key) == TCL_OK ? 1 : TCL_ERROR;
+    }
+
+    if (has_marker && marker != 13U &&
+        (marker < 129U || marker > 154U))
+        return stream_vm_error(vm, "invalid line terminator in command replay file");
+    for (i = 0U; line[i] != '\0'; ++i) {
+        unsigned char ch = (unsigned char)line[i];
+        if (ch < 32U || ch > 126U)
+            return stream_vm_error(vm,
+                                   "command replay line contains unsupported non-ASCII input");
+    }
+
+    if (zmachine_supply_input(vm, line) != TCL_OK)
+        return TCL_ERROR;
+    vm->pending_input_terminator = has_marker ? marker : 13U;
+    return 1;
+}
+
+/*
+ * Public run wrapper: automatically feed stream-1 records until the story
+ * yields for keyboard input, another host request, or termination. Output from
+ * multiple replay turns is accumulated so a single Tcl call does not lose text
+ * merely because the lower cooperative loop clears its per-run output buffer.
+ */
+int zmachine_run(ZMachine *vm)
+{
+    Tcl_DString accumulated;
+    int rc;
+    int replayed = 0;
+
+    Tcl_DStringInit(&accumulated);
+    for (;;) {
+        rc = zmachine_run_stream_base(vm);
+        if (rc != TCL_OK)
+            break;
+
+        if (vm->state == ZM_STATE_WAITING_INPUT &&
+            zmachine_current_input_stream(vm) == 1) {
+            Tcl_DStringAppend(&accumulated,
+                              Tcl_DStringValue(&vm->output),
+                              Tcl_DStringLength(&vm->output));
+            Tcl_DStringSetLength(&vm->output, 0);
+            replayed = 1;
+            rc = prepare_replay_input(vm);
+            if (rc == TCL_ERROR)
+                break;
+            if (rc == 0)
+                break;
+            continue;
+        }
+        break;
+    }
+
+    if (replayed) {
+        Tcl_DStringAppend(&accumulated,
+                          Tcl_DStringValue(&vm->output),
+                          Tcl_DStringLength(&vm->output));
+        Tcl_DStringSetLength(&vm->output, 0);
+        Tcl_DStringAppend(&vm->output,
+                          Tcl_DStringValue(&accumulated),
+                          Tcl_DStringLength(&accumulated));
+    }
+    Tcl_DStringFree(&accumulated);
+    return rc;
+}
+
+/* Transcript stream 2 receives story output unless stream 3 has precedence. */
+void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
+{
+    ZMachineStreamIO *io = vm ? vm->stream_io : NULL;
+
+    if (io && io->transcript && stream2_selected(vm) &&
+        vm->stream3_depth == 0U && text && len > 0U) {
+        if (write_external(vm, io->transcript, text, len,
+                           "unable to write transcript file") != TCL_OK)
+            return;
+    }
+    zmachine_output_append_stream_base(vm, text, len);
+}
+
+/* Add transcript/stream-4 side effects after the mature input writer succeeds. */
+int zmachine_input_read_line(ZMachine *vm,
+                             uint16_t text_buffer,
+                             uint16_t parse_buffer,
+                             uint16_t *terminator)
+{
+    uint16_t local_terminator = 13U;
+    int rc;
+
+    rc = zmachine_input_read_line_stream_base(vm, text_buffer, parse_buffer,
+                                              &local_terminator);
+    if (rc != TCL_OK)
+        return rc;
+    if (note_line_input(vm, text_buffer, local_terminator) != TCL_OK)
+        return TCL_ERROR;
+    if (terminator)
+        *terminator = local_terminator;
+    return TCL_OK;
+}
+
+/* Derive the read_char value which is about to be consumed by the lower layer. */
+static int pending_read_char_value(const ZMachine *vm, uint16_t *zscii)
+{
+    const unsigned char *data;
+    int length;
+
+    if (!vm || !zscii || !vm->input_available)
+        return 0;
+    data = (const unsigned char *)Tcl_DStringValue((Tcl_DString *)&vm->pending_input);
+    length = Tcl_DStringLength((Tcl_DString *)&vm->pending_input);
+    if (length == 2 && data[0] == 0U) {
+        *zscii = data[1];
+        return 1;
+    }
+    if (length == 0) {
+        *zscii = 13U;
+        return 1;
+    }
+    *zscii = (data[0] >= 32U && data[0] <= 126U) ? data[0] : 13U;
+    return 1;
+}
+
+/* Intercept external stream-selection opcodes and observe completed read_char. */
+int zmachine_step(ZMachine *vm)
+{
+    ZMachineInstruction instruction;
+    uint16_t values[ZM_MAX_OPERANDS];
+    char decode_error[128];
+    int was_read_char = 0;
+    uint16_t read_char_value = 0U;
+    uint32_t old_pc;
+    int rc;
+
+    if (!vm || !vm->memory)
+        return stream_vm_error(vm, "cannot execute without a loaded story");
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, &instruction,
+                                     decode_error, sizeof(decode_error)))
+        return stream_vm_error(vm, decode_error[0] ? decode_error :
+                               "unable to decode Z-machine instruction");
+
+    if (instruction.form == ZM_FORM_VARIABLE &&
+        instruction.operand_count == ZM_OPERANDS_VAR &&
+        (instruction.opcode_number == 19U ||
+         instruction.opcode_number == 20U)) {
+        if (instruction.operand_count_actual < 1U)
+            return stream_vm_error(vm, "stream selection opcode is missing its operand");
+        if (zmachine_resolve_operands(vm, &instruction, values,
+                                      ZM_MAX_OPERANDS) != TCL_OK)
+            return TCL_ERROR;
+
+        if (instruction.opcode_number == 20U) { /* input_stream */
+            ZMachineStreamIO *io = ensure_stream_io(vm);
+            if (!io)
+                return stream_vm_error(vm, "out of memory while selecting input stream");
+            if (values[0] == 0U) {
+                io->input_stream = 0U;
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+            if (values[0] != 1U)
+                return stream_vm_error(vm, "invalid Z-machine input stream");
+            if (io->replay) {
+                io->input_stream = 1U;
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+            return begin_request(vm, STREAM_REQUEST_REPLAY,
+                                 instruction.next_pc);
+        }
+
+        /* output_stream: own only host-file streams 2 and 4. */
+        {
+            int16_t stream = (int16_t)values[0];
+            ZMachineStreamIO *io;
+
+            if (stream != 2 && stream != -2 && stream != 4 && stream != -4)
+                return zmachine_step_stream_base(vm);
+            io = ensure_stream_io(vm);
+            if (!io)
+                return stream_vm_error(vm, "out of memory while selecting output stream");
+
+            if (stream == -2) {
+                select_stream2(vm, 0);
+                if (io->transcript)
+                    fflush(io->transcript);
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+            if (stream == -4) {
+                io->record_selected = 0;
+                if (io->record)
+                    fflush(io->record);
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+            if (stream == 2) {
+                if (io->transcript) {
+                    select_stream2(vm, 1);
+                    vm->pc = instruction.next_pc;
+                    return TCL_OK;
+                }
+                return begin_request(vm, STREAM_REQUEST_TRANSCRIPT,
+                                     instruction.next_pc);
+            }
+            if (io->record) {
+                io->record_selected = 1;
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+            return begin_request(vm, STREAM_REQUEST_RECORD,
+                                 instruction.next_pc);
+        }
+    }
+
+    if (instruction.form == ZM_FORM_VARIABLE &&
+        instruction.operand_count == ZM_OPERANDS_VAR &&
+        instruction.opcode_number == 22U)
+        was_read_char = pending_read_char_value(vm, &read_char_value);
+
+    old_pc = vm->pc;
+    rc = zmachine_step_stream_base(vm);
+    if (rc == TCL_OK && was_read_char && vm->pc != old_pc &&
+        note_key_input(vm, read_char_value) != TCL_OK)
+        return TCL_ERROR;
+    return rc;
+}
+
+/* Wrapper lifetime functions keep FILE handles out of the base VM module. */
+void zmachine_destroy(ZMachine *vm)
+{
+    close_stream_io(vm);
+    zmachine_destroy_stream_base(vm);
+}
+
+int zmachine_load_story(ZMachine *vm, const char *path)
+{
+    int rc;
+    close_stream_io(vm);
+    rc = zmachine_load_story_stream_base(vm, path);
+    return rc;
+}
+
+int zmachine_reset(ZMachine *vm)
+{
+    int rc = zmachine_reset_stream_base(vm);
+    if (rc == TCL_OK)
+        close_stream_io(vm);
+    return rc;
+}
