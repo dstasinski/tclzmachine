@@ -2,10 +2,11 @@
  * input_run.c
  *
  * Regression tests for cooperative line input. The first case exercises the
- * normal V5 text+parse form, including dictionary tokenization. The second
- * covers Infocom-compatible V5 code which omits the parse operand entirely;
- * tclzmachine treats that encoding as parse-buffer zero and therefore performs
- * no lexical analysis while still storing the terminating character.
+ * normal V5 text+parse form, including dictionary tokenization and host-side
+ * character validation. The second covers Infocom-compatible V5 code which
+ * omits the parse operand entirely; tclzmachine treats that encoding as parse-
+ * buffer zero and therefore performs no lexical analysis while still storing
+ * the terminating character.
  */
 
 #include "tclzmachine.h"
@@ -77,7 +78,23 @@ int main(void)
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(vm.pc == 0x20U);
 
+        /*
+         * Tcl strings are UTF-8 but the current line-input capability is
+         * printable ASCII ZSCII only. Reject both multibyte Unicode and control
+         * characters without consuming the pending read or poisoning the VM.
+         */
+        assert(zmachine_supply_input(&vm, "\xC3\xA9") == TCL_ERROR);
+        assert(vm.state == ZM_STATE_WAITING_INPUT);
+        assert(vm.input_available == 0);
+        assert(Tcl_DStringLength(&vm.pending_input) == 0);
+        assert(strstr(vm.error, "printable ASCII") != NULL);
+
+        assert(zmachine_supply_input(&vm, "bad\tinput") == TCL_ERROR);
+        assert(vm.state == ZM_STATE_WAITING_INPUT);
+        assert(vm.input_available == 0);
+
         assert(zmachine_supply_input(&vm, "LOOK") == TCL_OK);
+        assert(vm.error[0] == '\0');
         assert(zmachine_run(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_HALTED);
         assert(vm.pc == 0x28U);
