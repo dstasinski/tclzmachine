@@ -1,11 +1,12 @@
 /*
  * core_extra.c
  *
- * Regression coverage for V5+ core opcodes implemented by the incremental
+ * Regression coverage for core opcodes implemented by the incremental
  * standards-completeness layer: catch/throw, VAR-form not, the two EXT shifts,
- * and delegated-core operand validation. Tests execute through the public
- * layered zmachine_step() entry point so decoder form distinctions, validation,
- * and delegation behavior are exercised as well as opcode calculations.
+ * text-safe buffer_screen behavior, reserved extended-opcode handling, and
+ * delegated-core operand validation. Tests execute through the public layered
+ * zmachine_step() entry point so decoder form distinctions, validation, operand
+ * side effects, and delegation behavior are exercised as well as calculations.
  */
 
 #include "tclzmachine.h"
@@ -18,19 +19,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void init_vm(ZMachine *vm)
+static void init_vm_version(ZMachine *vm, uint8_t version)
 {
     memset(vm, 0, sizeof(*vm));
     vm->memory = (uint8_t *)calloc(1024U, 1U);
     assert(vm->memory != NULL);
     vm->memory_size = 1024U;
-    vm->version = 5U;
+    vm->version = version;
     vm->static_memory_addr = 0x300U;
     vm->globals_addr = 0x100U;
     vm->state = ZM_STATE_READY;
     vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
+}
+
+static void init_vm(ZMachine *vm)
+{
+    init_vm_version(vm, 5U);
 }
 
 static void free_vm(ZMachine *vm)
@@ -186,6 +192,73 @@ int main(void)
         assert(zmachine_step(&vm) == TCL_OK);
         assert(read_global(&vm, 0x13U) == 0xFFFFU);
 
+        free_vm(&vm);
+    }
+
+    /*
+     * EXT:29 is not defined for V5. The Standard's out-of-range EXT rule says it
+     * is ignored there, so even a variable-0 operand must remain unevaluated and
+     * the byte after the decoded operands is not consumed as a store record.
+     */
+    {
+        ZMachine vm;
+
+        init_vm_version(&vm, 5U);
+        assert(zmachine_stack_push(&vm, 1U) == TCL_OK);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBEU;
+        vm.memory[0x21U] = 0x1DU; /* EXT:29 */
+        vm.memory[0x22U] = 0xBFU; /* one variable operand */
+        vm.memory[0x23U] = 0x00U; /* variable 0 */
+        vm.memory[0x24U] = 0x10U; /* must remain the next instruction byte */
+
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x24U);
+        assert(vm.sp == 1U && vm.stack[0] == 1U);
+        free_vm(&vm);
+    }
+
+    /* Reserved EXT:30+ opcodes are ignored without evaluating their operands. */
+    {
+        ZMachine vm;
+
+        init_vm_version(&vm, 7U);
+        assert(zmachine_stack_push(&vm, 0xCAFEU) == TCL_OK);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBEU;
+        vm.memory[0x21U] = 0x1EU; /* EXT:30 */
+        vm.memory[0x22U] = 0xBFU; /* one variable operand */
+        vm.memory[0x23U] = 0x00U; /* variable 0 */
+
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x24U);
+        assert(vm.sp == 1U && vm.stack[0] == 0xCAFEU);
+        free_vm(&vm);
+    }
+
+    /*
+     * V7 inherits V6+ buffer_screen. This text-only runtime ignores buffering
+     * advice and therefore always reports old state 0, but it still evaluates
+     * the real operand and consumes the required store byte.
+     */
+    {
+        ZMachine vm;
+
+        init_vm_version(&vm, 7U);
+        vm.memory[0x100U] = 0x12U;
+        vm.memory[0x101U] = 0x34U;
+        assert(zmachine_stack_push(&vm, 1U) == TCL_OK);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBEU;
+        vm.memory[0x21U] = 0x1DU; /* EXT:29 buffer_screen */
+        vm.memory[0x22U] = 0xBFU; /* one variable operand */
+        vm.memory[0x23U] = 0x00U; /* mode from variable 0 */
+        vm.memory[0x24U] = 0x10U; /* store global 16 */
+
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.pc == 0x25U);
+        assert(vm.sp == 0U);
+        assert(read_global(&vm, 0x10U) == 0U);
         free_vm(&vm);
     }
 
