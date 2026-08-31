@@ -22,6 +22,9 @@ int zmachine_stream_file(ZMachine *vm, const char *kind, const char *path);
 /* Decline the currently pending replay/transcript/record path request. */
 int zmachine_cancel_stream_file(ZMachine *vm);
 
+/* Normalize interpreter-only stream selection after a Z-machine restart. */
+void zmachine_stream_after_restart(ZMachine *vm);
+
 /* Read-only host metadata used by zmachine::info. */
 const char *zmachine_pending_stream_request(const ZMachine *vm);
 int zmachine_current_input_stream(const ZMachine *vm);
