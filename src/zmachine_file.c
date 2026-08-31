@@ -17,8 +17,8 @@
 
 #include <stdio.h>
 
-/* Presentation wrapper supplied by zmachine_dispatch.c after symbol rename. */
-extern int zmachine_step_present(ZMachine *vm);
+/* Lexical opcode layer supplied by zmachine_tokenise.c. */
+extern int zmachine_step_tokenise(ZMachine *vm);
 
 static int file_error(ZMachine *vm, const char *message)
 {
@@ -148,7 +148,7 @@ static int handle_file_request(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Public one-instruction entry point, layered above presentation dispatch. */
+/* Public one-instruction entry point above lexical/presentation/core dispatch. */
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -171,7 +171,7 @@ int zmachine_step(ZMachine *vm)
     if (handled)
         return TCL_OK;
 
-    return zmachine_step_present(vm);
+    return zmachine_step_tokenise(vm);
 }
 
 int zmachine_save_file(ZMachine *vm, const char *path)
