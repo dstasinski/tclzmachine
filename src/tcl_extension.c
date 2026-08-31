@@ -159,6 +159,40 @@ static int run_session(Tcl_Interp *interp, Session *s)
     return set_session_output(interp, s);
 }
 
+/*
+ * Classify the instruction on which a cooperative input wait is suspended.
+ *
+ * No additional VM state is stored for this purpose: `read` and `read_char`
+ * leave the program counter at the waiting instruction, so decoding that one
+ * instruction provides stable host metadata without another synchronization
+ * field which could become stale. Unknown/malformed waits are reported as an
+ * empty string rather than turning a read-only `zmachine::info` call into an
+ * execution error.
+ */
+static const char *input_request_kind(const ZMachine *vm)
+{
+    ZMachineInstruction instruction;
+    char decode_error[128];
+
+    if (!vm || !vm->memory || vm->state != ZM_STATE_WAITING_INPUT)
+        return "";
+
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, &instruction,
+                                     decode_error, sizeof(decode_error)))
+        return "";
+
+    if (instruction.form != ZM_FORM_VARIABLE ||
+        instruction.operand_count != ZM_OPERANDS_VAR)
+        return "";
+
+    if (instruction.opcode_number == 4U)
+        return "line";
+    if (instruction.opcode_number == 22U)
+        return "char";
+    return "";
+}
+
 static int cmd_create(ClientData clientData, Tcl_Interp *interp,
                       int objc, Tcl_Obj *const objv[])
 {
@@ -424,7 +458,12 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
 }
 
 /*
- * Return session state and cooperative file-request metadata as a Tcl dict.
+ * Return session state and cooperative host-request metadata as a Tcl dict.
+ *
+ * inputRequest is empty unless the VM is suspended on input, in which case it
+ * is `line` for VAR:4 read/sread/aread or `char` for VAR:22 read_char. This lets
+ * an embedding application choose `zmachine::command` versus `zmachine::key`
+ * without interpreting numeric VM states or decoding story memory itself.
  *
  * fileRequest remains the stable high-level save/restore indicator. When a
  * request is pending, fileRequestKind distinguishes full Quetzal state from a
@@ -440,6 +479,7 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
     const char *name;
     const char *file_request = "";
     const char *file_request_kind = "";
+    const char *input_request;
 
     if (objc != 2) {
         Tcl_WrongNumArgs(interp, 1, objv, "session");
@@ -453,6 +493,8 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
             Tcl_ObjPrintf("unknown session \"%s\"", name));
         return TCL_ERROR;
     }
+
+    input_request = input_request_kind(s->vm);
 
     if (s->vm->state == ZM_STATE_WAITING_SAVE)
         file_request = "save";
@@ -483,6 +525,8 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewIntObj(s->vm->string_offset));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("state", -1),
                    Tcl_NewIntObj((int)s->vm->state));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("inputRequest", -1),
+                   Tcl_NewStringObj(input_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
                    Tcl_NewStringObj(file_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequestKind", -1),
