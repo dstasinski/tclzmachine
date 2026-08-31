@@ -42,7 +42,7 @@ The runtime now contains a working execution core rather than only starter scaff
 - Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
 - standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
 - cooperative `read` and `read_char` suspension/resumption, including V5+ preloaded line-input buffers
-- printable-ASCII host line validation plus exact numeric ZSCII `read_char` input for arrows, function keys, keypad keys, and defined extra characters
+- printable-ASCII host line validation plus exact numeric ZSCII key input for `read_char` and V5+ terminating-character-table line completion
 - dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`, including custom alphabet tables and standard lowercase dictionary encryption
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
@@ -91,7 +91,7 @@ puts $response
 
 The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore filename, halts, or encounters an error.
 
-When a story is suspended on `read_char`, use `zmachine::key` to supply one exact numeric ZSCII input code instead of trying to encode a special key into a Tcl string:
+Use `zmachine::key` to supply one exact numeric ZSCII keyboard event when the story is waiting for character input:
 
 ```tcl
 # ZSCII 129 = cursor up
@@ -99,7 +99,9 @@ set response [zmachine::key game1 129]
 puts $response
 ```
 
-`zmachine::key` accepts ordinary keyboard-input ZSCII such as Enter (`13`), Escape (`27`), printable ASCII (`32`-`126`), cursor/function/keypad codes (`129`-`154`), and extra-character codes that are defined by the story's active Unicode translation table. Undefined/reserved codes are rejected without consuming the pending `read_char`, so the host may retry. Mouse/menu event codes `252`-`254` are intentionally unavailable because this text-only runtime exposes no mouse or click-position state.
+For `read_char`, `zmachine::key` accepts ordinary keyboard-input ZSCII such as Enter (`13`), Escape (`27`), printable ASCII (`32`-`126`), cursor/function/keypad codes (`129`-`154`), and extra-character codes that are defined by the story's active Unicode translation table. Undefined/reserved codes are rejected without consuming the pending input request, so the host may retry. Mouse/menu event codes `252`-`254` are intentionally unavailable because this text-only runtime exposes no mouse or click-position state.
+
+For a suspended line read, `zmachine::key` may supply Enter (`13`) or, in V5 and later, a keyboard function key (`129`-`154`) named by the story's terminating-character table at header word `$2e`. Table value `255` means any function key. The terminating key becomes `aread`'s stored result and is not inserted into the text buffer; any V5+ preloaded text already in that buffer is preserved and tokenized normally. An unlisted function key is rejected without consuming the pending line read.
 
 The older convenience behavior remains: if a normal `zmachine::command` reaches `read_char` while its command string is already queued, the first printable ASCII character can satisfy that request. `zmachine::key` is the unambiguous API for non-ASCII ZSCII keyboard events.
 
@@ -109,6 +111,8 @@ Inspect session metadata:
 set info [zmachine::info game1]
 puts $info
 ```
+
+`inputRequest` is empty when no cooperative input is pending, `line` while the session is suspended on `read`/`sread`/`aread`, and `char` while it is suspended on `read_char`. This lets an embedding bot choose between `zmachine::command` and `zmachine::key` without decoding VM instructions itself.
 
 `fileRequest` in that dictionary is empty during ordinary play and becomes `save` or `restore` when the story has yielded for host file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
 
