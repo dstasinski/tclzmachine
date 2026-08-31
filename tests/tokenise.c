@@ -6,8 +6,10 @@
  *
  * The test exercises the public instruction path, the main story dictionary,
  * the optional user-dictionary operand, dictionary separators, parse-buffer
- * positions, the flag which preserves slots for unrecognized words, and direct
- * six-byte dictionary encoding of an explicit story-memory slice.
+ * positions, the flag which preserves slots for unrecognized words, direct
+ * six-byte dictionary encoding of an explicit story-memory slice, and the
+ * distinction between read's special parse=0 convention and tokenise's required
+ * parse-table destination.
  */
 
 #include "tclzmachine.h"
@@ -127,6 +129,23 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x56U);
     assert(memcmp(vm.memory + 0xA0U, encoded_look, 6U) == 0);
+
+    /*
+     * VAR:27 has no read-style “parse zero means skip parsing” convention.
+     * Rejecting it here prevents a silent successful no-op and makes the
+     * malformed destination visible to the embedding application.
+     */
+    vm.pc = 0x60U;
+    vm.state = ZM_STATE_READY;
+    vm.error[0] = '\0';
+    vm.memory[0x60U] = 0xFBU;
+    vm.memory[0x61U] = 0x5FU;
+    vm.memory[0x62U] = 0x40U;
+    vm.memory[0x63U] = 0U;
+    assert(zmachine_step(&vm) == TCL_ERROR);
+    assert(vm.state == ZM_STATE_ERROR);
+    assert(strstr(vm.error, "nonzero parse buffer") != NULL);
+    assert(vm.memory[0x41U] == (uint8_t)(sizeof(text) - 1U));
 
     zmachine_undo_discard(&vm);
     free(vm.memory);
