@@ -1,3 +1,16 @@
+/*
+ * text_exec.c
+ *
+ * Instruction-level regression coverage for Z-machine text output opcodes.
+ * Hand-encoded V3/V5 instructions verify inline `print`, `new_line`,
+ * `print_addr`, object short-name `print_obj`, `print_char`, signed `print_num`,
+ * and `print_ret` including its newline and routine-return side effects.
+ *
+ * Z-text decoding details are tested directly in text.c; this file locks down
+ * executor integration, instruction continuation addresses, and call-frame
+ * behavior around text-producing instructions.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
 
@@ -6,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocate a writable synthetic VM with normal stream 1 selected. */
 static void init_vm(ZMachine *vm, uint8_t version, size_t size)
 {
     memset(vm, 0, sizeof(*vm));
@@ -21,6 +35,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     Tcl_DStringInit(&vm->pending_input);
 }
 
+/* Release storage initialized by init_vm(). */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -28,12 +43,14 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
+/* Write one big-endian synthetic story word. */
 static void put16(uint8_t *memory, size_t address, uint16_t value)
 {
     memory[address] = (uint8_t)(value >> 8);
     memory[address + 1U] = (uint8_t)value;
 }
 
+/* Pack three 5-bit Z-characters into one encoded Z-text word. */
 static uint16_t zword(unsigned a, unsigned b, unsigned c, int last)
 {
     return (uint16_t)((last ? 0x8000U : 0U) |
@@ -44,6 +61,7 @@ static uint16_t zword(unsigned a, unsigned b, unsigned c, int last)
 
 int main(void)
 {
+    /* Inline print consumes its packed words; new_line follows at next PC. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
@@ -62,6 +80,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* print_addr decodes an unpacked byte address and then resumes normally. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
@@ -75,6 +94,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* print_obj locates the object's short name through its property table. */
     {
         ZMachine vm;
         size_t object1;
@@ -95,6 +115,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V5 print_char and signed print_num append to the same canonical stream. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -112,6 +133,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* print_ret appends newline and returns true from the active routine. */
     {
         ZMachine vm;
         init_vm(&vm, 3U, 512U);
