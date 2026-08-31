@@ -172,11 +172,13 @@ static uint16_t random_result(ZMachine *vm, int16_t range)
 /*
  * Handle VAR:4 read/sread/aread at the cooperative host boundary.
  *
- * No operands are evaluated until input is actually available; this preserves
- * stack-variable side effects across suspension. V5+ permits a missing/zero
- * parse buffer and stores the terminating character. Timed input is not
- * advertised by this runtime, so nonzero timeout/routine operands are rejected
- * rather than silently pretending the timeout facility exists.
+ * Structural validation happens before suspension, but operands are not
+ * evaluated until input is actually available. This distinction is observable
+ * when an operand is variable 0: merely yielding for input must not pop the
+ * evaluation stack. V5+ permits a missing/zero parse buffer and stores the
+ * terminating character. Timed input is not advertised by this runtime, so
+ * nonzero timeout/routine operands are rejected rather than silently pretending
+ * the timeout facility exists.
  */
 static int handle_read(ZMachine *vm,
                        const ZMachineInstruction *instruction,
@@ -196,14 +198,14 @@ static int handle_read(ZMachine *vm,
         return TCL_OK;
 
     *handled = 1;
+    if (instruction->operand_count_actual < 1U ||
+        (vm->version <= 4U && instruction->operand_count_actual < 2U))
+        return run_error(vm, "read opcode is missing required buffer operands");
+
     if (!vm->input_available) {
         vm->state = ZM_STATE_WAITING_INPUT;
         return TCL_OK;
     }
-
-    if (instruction->operand_count_actual < 1U ||
-        (vm->version <= 4U && instruction->operand_count_actual < 2U))
-        return run_error(vm, "read opcode is missing required buffer operands");
 
     if (zmachine_resolve_operands(vm, instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
@@ -295,6 +297,12 @@ static int execute_restart(ZMachine *vm)
  * guard is the central reason this module exists: an EXT opcode with the same
  * low opcode number must continue down to the extended/presentation/core layers
  * rather than being consumed here accidentally.
+ *
+ * Version and arity checks for owned VAR opcodes deliberately precede operand
+ * resolution. An instruction which is illegal for the story version must not
+ * acquire operand side effects before it is rejected; in particular, resolving
+ * variable 0 pops the evaluation stack. Once an opcode is known to be legal and
+ * structurally complete, its operands are resolved exactly once.
  */
 static int handle_interpreter_opcode(ZMachine *vm,
                                      const ZMachineInstruction *instruction,
@@ -329,17 +337,19 @@ static int handle_interpreter_opcode(ZMachine *vm,
             }
             return TCL_OK;
 
-        case 13U: /* verify */
+        case 13U: /* verify is introduced in Version 3. */
             *handled = 1;
+            if (vm->version < 3U)
+                return run_error(vm, "verify is unavailable before Version 3");
             return apply_branch(vm, instruction->next_pc,
                                 story_checksum_matches(vm));
 
-        case 15U: /* piracy: standards-conforming interpreters always branch. */
-            if (vm->version >= 5U) {
-                *handled = 1;
-                return apply_branch(vm, instruction->next_pc, 1);
-            }
-            return TCL_OK;
+        case 15U: /* piracy is introduced in Version 5. */
+            *handled = 1;
+            if (vm->version < 5U)
+                return run_error(vm, "piracy is unavailable before Version 5");
+            /* Standards-conforming interpreters always take the piracy branch. */
+            return apply_branch(vm, instruction->next_pc, 1);
 
         default:
             return TCL_OK;
@@ -355,6 +365,40 @@ static int handle_interpreter_opcode(ZMachine *vm,
         instruction->opcode_number != 31U)
         return TCL_OK;
 
+    /*
+     * Establish ownership, version legality, and arity before resolving any
+     * operand. Returning handled=1 on an illegal owned opcode prevents a lower
+     * layer from resolving the same variable operands again while reporting a
+     * generic unsupported-opcode failure.
+     */
+    switch (instruction->opcode_number) {
+    case 7U: /* random range -> result */
+        *handled = 1;
+        if (instruction->operand_count_actual != 1U)
+            return run_error(vm, "random requires exactly one range operand");
+        break;
+
+    case 23U: /* scan_table x table len [form] -> result ?branch */
+        *handled = 1;
+        if (vm->version < 4U)
+            return run_error(vm, "scan_table is unavailable before Version 4");
+        if (instruction->operand_count_actual < 3U ||
+            instruction->operand_count_actual > 4U)
+            return run_error(vm, "scan_table requires three or four operands");
+        break;
+
+    case 31U: /* check_arg_count argument-number ?branch */
+        *handled = 1;
+        if (vm->version < 5U)
+            return run_error(vm, "check_arg_count is unavailable before Version 5");
+        if (instruction->operand_count_actual != 1U)
+            return run_error(vm, "check_arg_count requires exactly one argument number");
+        break;
+
+    default:
+        return TCL_OK;
+    }
+
     if (zmachine_resolve_operands(vm, instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
@@ -363,9 +407,6 @@ static int handle_interpreter_opcode(ZMachine *vm,
     case 7U: { /* random range -> result */
         uint32_t next_pc;
 
-        if (instruction->operand_count_actual < 1U)
-            return run_error(vm, "random requires a range operand");
-        *handled = 1;
         if (store_result(vm, instruction->next_pc,
                          random_result(vm, (int16_t)values[0]),
                          &next_pc) != TCL_OK)
@@ -381,12 +422,6 @@ static int handle_interpreter_opcode(ZMachine *vm,
         uint32_t branch_pc;
         uint32_t field_size;
         int words;
-
-        if (vm->version < 4U)
-            return TCL_OK;
-        if (instruction->operand_count_actual < 3U)
-            return run_error(vm, "scan_table requires x, table, and len operands");
-        *handled = 1;
 
         form = instruction->operand_count_actual >= 4U ? values[3] : 0x82U;
         words = (form & 0x80U) != 0U;
@@ -425,12 +460,6 @@ static int handle_interpreter_opcode(ZMachine *vm,
         const ZMachineFrame *frame;
         uint16_t argument_number;
         int supplied = 0;
-
-        if (vm->version < 5U)
-            return TCL_OK;
-        if (instruction->operand_count_actual < 1U)
-            return run_error(vm, "check_arg_count requires an argument number");
-        *handled = 1;
 
         argument_number = values[0];
         frame = zmachine_current_frame_const(vm);
