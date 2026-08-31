@@ -1,12 +1,12 @@
 /*
  * get_child_stack.c
  *
- * Regression for operand side effects around the text-only dispatcher.
+ * Regression for operand side effects and null-object handling around
+ * `get_child`.
  *
  * A VARIABLE operand naming variable 0 pops the evaluation stack exactly once.
- * The dispatcher has a narrow compatibility case for literal `get_child 0`;
- * it must not speculatively resolve a non-literal operand and then delegate the
- * instruction to the core, because that would pop variable 0 twice.
+ * After that single resolution step, both an ordinary object number and the
+ * runtime null value 0 must be handled correctly by the core/object path.
  */
 
 #include "tclzmachine.h"
@@ -61,9 +61,8 @@ int main(void)
 
     /*
      * 1OP:2 get_child with a VARIABLE operand naming variable 0. The operand
-     * must consume the pushed object number once, not once in the dispatcher
-     * and again in the core. Store the child in global 0x10; branch-on-true
-     * falls through because object #2 has no child.
+     * must consume the pushed object number once. Store the child in global
+     * 0x10; branch-on-true falls through because object #2 has no child.
      */
     vm.memory[0x23U] = 0xA2U;
     vm.memory[0x24U] = 0U;
@@ -74,11 +73,34 @@ int main(void)
     assert(vm.sp == 0U);
     assert(read_global(&vm, 0x10U) == 0U);
 
+    /*
+     * Repeat the same VARIABLE-0 encoding with a runtime value of zero. The
+     * stack operand must still be consumed exactly once, but object zero is the
+     * null object: get_child stores zero and takes the false branch rather than
+     * attempting to index a nonexistent object-table entry.
+     */
+    vm.pc = 0x30U;
+    vm.memory[0x30U] = 0xE8U;
+    vm.memory[0x31U] = 0x7FU;
+    vm.memory[0x32U] = 0U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x33U);
+    assert(vm.sp == 1U && vm.stack[0] == 0U);
+
+    vm.memory[0x33U] = 0xA2U;
+    vm.memory[0x34U] = 0U;
+    vm.memory[0x35U] = 0x11U;
+    vm.memory[0x36U] = 0xC2U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(vm.pc == 0x37U);
+    assert(vm.sp == 0U);
+    assert(read_global(&vm, 0x11U) == 0U);
+
     zmachine_undo_discard(&vm);
     free(vm.memory);
     Tcl_DStringFree(&vm.output);
     Tcl_DStringFree(&vm.pending_input);
 
-    puts("get_child stack operand regression passed");
+    puts("get_child stack/null operand regression passed");
     return 0;
 }
