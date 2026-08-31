@@ -52,6 +52,28 @@ try {
     if {[dict get $settings -wordwrap] != 0} {
         error "word wrapping should be disabled by default"
     }
+    if {[dict get $settings -format] ne "plain"} {
+        error "plain output should be the default"
+    }
+
+    if {[zmachine::configure smoke -format mirc] ne "mirc"} {
+        error "unable to enable mIRC output"
+    }
+    if {[zmachine::configure smoke -format] ne "mirc"} {
+        error "mIRC output selection did not persist"
+    }
+    if {[dict get [zmachine::info smoke] outputFormat] ne "mirc"} {
+        error "zmachine::info did not report mIRC output"
+    }
+    if {![catch {zmachine::configure smoke -format html} message]} {
+        error "unknown output formats must be rejected"
+    }
+    if {$message ne {unknown output format "html": must be plain or mirc}} {
+        error "unexpected output-format diagnostic: $message"
+    }
+    if {[zmachine::configure smoke -format plain] ne "plain"} {
+        error "unable to restore plain output"
+    }
 
     if {[zmachine::configure smoke -wordwrap 400] != 400} {
         error "unable to set word-wrap byte limit"
@@ -72,15 +94,16 @@ try {
     }
 
     set info [zmachine::info smoke]
-    foreach key {streamRequest inputStream commandRecording} {
+    foreach key {streamRequest inputStream commandRecording outputFormat} {
         if {![dict exists $info $key]} {
-            error "zmachine::info is missing stream metadata key $key"
+            error "zmachine::info is missing metadata key $key"
         }
     }
     if {[dict get $info streamRequest] ne "" ||
         [dict get $info inputStream] != 0 ||
-        [dict get $info commandRecording]} {
-        error "unexpected default external stream state: $info"
+        [dict get $info commandRecording] ||
+        [dict get $info outputFormat] ne "plain"} {
+        error "unexpected default external/presentation state: $info"
     }
 
     zmachine::destroy smoke
@@ -144,4 +167,4 @@ try {
     file delete -force $input_story_path
 }
 
-puts "tclzmachine package, configuration, input, and stream metadata APIs loaded successfully"
+puts "tclzmachine package, output-format, input, and stream metadata APIs loaded successfully"
