@@ -16,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* One Tcl-visible game session and its presentation configuration. */
 typedef struct Session {
     char *name;
     ZMachine *vm;
@@ -24,7 +23,6 @@ typedef struct Session {
     struct Session *next;
 } Session;
 
-/* Interpreter-associated state shared by all Tcl command implementations. */
 typedef struct ExtensionState {
     Session *sessions;
 } ExtensionState;
@@ -160,7 +158,6 @@ static int run_session(Tcl_Interp *interp, Session *s)
     return set_session_output(interp, s);
 }
 
-/* Tcl command: zmachine::create session storyfile */
 static int cmd_create(ClientData clientData, Tcl_Interp *interp,
                       int objc, Tcl_Obj *const objv[])
 {
@@ -213,7 +210,6 @@ static int cmd_create(ClientData clientData, Tcl_Interp *interp,
     return TCL_OK;
 }
 
-/* Tcl command: zmachine::command session command */
 static int cmd_command(ClientData clientData, Tcl_Interp *interp,
                        int objc, Tcl_Obj *const objv[])
 {
@@ -237,7 +233,7 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
     if (s->vm->state == ZM_STATE_WAITING_SAVE ||
         s->vm->state == ZM_STATE_WAITING_RESTORE) {
         Tcl_SetObjResult(interp,
-            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s",
+            Tcl_ObjPrintf("session \"%s\" is waiting for zmachine::%s or zmachine::cancel",
                           name,
                           s->vm->state == ZM_STATE_WAITING_SAVE ? "save" : "restore"));
         return TCL_ERROR;
@@ -248,7 +244,6 @@ static int cmd_command(ClientData clientData, Tcl_Interp *interp,
     return run_session(interp, s);
 }
 
-/* Tcl command: zmachine::save session path */
 static int cmd_save(ClientData clientData, Tcl_Interp *interp,
                     int objc, Tcl_Obj *const objv[])
 {
@@ -273,7 +268,6 @@ static int cmd_save(ClientData clientData, Tcl_Interp *interp,
     return run_session(interp, s);
 }
 
-/* Tcl command: zmachine::restore session path */
 static int cmd_restore(ClientData clientData, Tcl_Interp *interp,
                        int objc, Tcl_Obj *const objv[])
 {
@@ -298,7 +292,31 @@ static int cmd_restore(ClientData clientData, Tcl_Interp *interp,
     return run_session(interp, s);
 }
 
-/* Tcl command: zmachine::configure session ?-wordwrap ?bytes?? */
+/* Tcl command: zmachine::cancel session -- decline pending save/restore. */
+static int cmd_cancel(ClientData clientData, Tcl_Interp *interp,
+                      int objc, Tcl_Obj *const objv[])
+{
+    ExtensionState *state = (ExtensionState *)clientData;
+    Session *s;
+    const char *name;
+
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session");
+        return TCL_ERROR;
+    }
+    name = Tcl_GetString(objv[1]);
+    s = find_session(state, name);
+    if (!s) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("unknown session \"%s\"", name));
+        return TCL_ERROR;
+    }
+
+    if (zmachine_cancel_file(s->vm) != TCL_OK)
+        return set_vm_failure(interp, s->vm);
+    return run_session(interp, s);
+}
+
 static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
                          int objc, Tcl_Obj *const objv[])
 {
@@ -360,7 +378,6 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
     return TCL_OK;
 }
 
-/* Tcl command: zmachine::info session */
 static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                     int objc, Tcl_Obj *const objv[])
 {
@@ -415,7 +432,6 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
     return TCL_OK;
 }
 
-/* Tcl command: zmachine::destroy session */
 static int cmd_destroy(ClientData clientData, Tcl_Interp *interp,
                        int objc, Tcl_Obj *const objv[])
 {
@@ -445,7 +461,6 @@ static int cmd_destroy(ClientData clientData, Tcl_Interp *interp,
     return TCL_ERROR;
 }
 
-/* Package initialization entry point called by Tcl's load command. */
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -472,6 +487,8 @@ int Tclzmachine_Init(Tcl_Interp *interp)
                          cmd_save, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::restore",
                          cmd_restore, state, NULL);
+    Tcl_CreateObjCommand(interp, "::zmachine::cancel",
+                         cmd_cancel, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::configure",
                          cmd_configure, state, NULL);
     Tcl_CreateObjCommand(interp, "::zmachine::info",
