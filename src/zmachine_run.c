@@ -236,21 +236,38 @@ static int handle_read(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Restore the story's initial dynamic memory and volatile session state. */
+/*
+ * Restore the story's initial dynamic memory and volatile session state.
+ *
+ * restart is intentionally narrower than restore/undo for Flags 2. Its opcode
+ * contract says only bit 0 (transcription) and bit 1 (fixed-pitch request)
+ * survive from the live session. Every other Flags 2 bit comes back from the
+ * pristine story image, after which zmachine_refresh_interpreter_header()
+ * reapplies the interpreter-owned capability/Rst fields. Preserving the whole
+ * live word here would incorrectly carry transient redraw and game-request bits
+ * across a restart.
+ */
 static int execute_restart(ZMachine *vm)
 {
-    uint16_t preserved_flags2;
+    uint16_t live_flags2;
+    uint16_t initial_flags2;
+    uint16_t restarted_flags2;
 
     if (!vm->initial_dynamic_memory ||
-        vm->initial_dynamic_memory_size != vm->static_memory_addr)
+        vm->initial_dynamic_memory_size != vm->static_memory_addr ||
+        vm->initial_dynamic_memory_size <= 0x11U)
         return run_error(vm, "restart image is unavailable");
 
-    preserved_flags2 = read_be16(vm->memory + 0x10U);
+    live_flags2 = read_be16(vm->memory + 0x10U);
+    initial_flags2 = read_be16(vm->initial_dynamic_memory + 0x10U);
+    restarted_flags2 = (uint16_t)((initial_flags2 & (uint16_t)~0x0003U) |
+                                  (live_flags2 & 0x0003U));
+
     memcpy(vm->memory, vm->initial_dynamic_memory,
            vm->initial_dynamic_memory_size);
-    vm->memory[0x10U] = (uint8_t)(preserved_flags2 >> 8);
-    vm->memory[0x11U] = (uint8_t)preserved_flags2;
-    vm->flags2 = preserved_flags2;
+    vm->memory[0x10U] = (uint8_t)(restarted_flags2 >> 8);
+    vm->memory[0x11U] = (uint8_t)restarted_flags2;
+    vm->flags2 = restarted_flags2;
 
     zmachine_undo_discard(vm);
     vm->pc = vm->initial_pc;
