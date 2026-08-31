@@ -168,30 +168,35 @@ static int store_zero_and_branch_false(ZMachine *vm, uint32_t store_pc)
 }
 
 /*
- * Compatibility handling for get_child object 0.
+ * Compatibility handling for a literal `get_child 0`.
  *
  * Object zero is the Z-machine's null object and has no table entry. The
- * specification leaves queries of object zero undefined, but legacy story
- * code and compatibility suites may still issue get_child 0. Returning zero
- * and taking the opcode's false branch is the conservative behaviour.
+ * specification leaves queries of object zero undefined, but some legacy code
+ * issues a literal get_child 0 and expects zero plus the false branch.
+ *
+ * Do not resolve variable operands here merely to discover whether their
+ * runtime value is zero. Resolving variable 0 pops the evaluation stack; if a
+ * nonzero object were then delegated to the core executor it would be resolved
+ * and popped a second time. Restricting this compatibility path to an encoded
+ * constant zero preserves the core rule that operand side effects occur once.
  */
 static int handle_null_get_child(ZMachine *vm,
                                  const ZMachineInstruction *instruction,
                                  int *handled)
 {
-    uint16_t values[ZM_MAX_OPERANDS];
+    const ZMachineDecodedOperand *operand;
 
     *handled = 0;
     if (!vm || !instruction ||
         instruction->operand_count != ZM_OPERANDS_1OP ||
-        instruction->opcode_number != 2U)
+        instruction->opcode_number != 2U ||
+        instruction->operand_count_actual != 1U)
         return TCL_OK;
 
-    if (zmachine_resolve_operands(vm, instruction, values,
-                                  ZM_MAX_OPERANDS) != TCL_OK)
-        return TCL_ERROR;
-
-    if (values[0] != 0U)
+    operand = &instruction->operands[0];
+    if ((operand->type != ZM_OPERAND_SMALL_CONSTANT &&
+         operand->type != ZM_OPERAND_LARGE_CONSTANT) ||
+        operand->value != 0U)
         return TCL_OK;
 
     *handled = 1;
