@@ -14,6 +14,7 @@ set(TCLZMACHINE_VM_SOURCES
     src/zmachine_run.c
     src/zmachine_decode.c
     src/zmachine_dispatch.c
+    src/zmachine_key.c
     src/zmachine_core_extra.c
     src/zmachine_exec.c
     src/zmachine_file_aux.c
@@ -37,6 +38,7 @@ set(TCLZMACHINE_VM_SOURCES
 #   zmachine_file_aux.c   public step/file API, V5+ auxiliary byte-region files
 #   zmachine_file.c       full-game Quetzal file-request base layer
 #   zmachine_tokenise.c   non-blocking lexical analysis opcodes
+#   zmachine_key.c        exact numeric ZSCII input for read_char
 #   zmachine_dispatch.c   presentation/text-only compatibility wrapper
 #   zmachine_core_extra.c pure control/arithmetic completeness opcodes
 #   zmachine_exec.c       original ordinary core opcode executor
