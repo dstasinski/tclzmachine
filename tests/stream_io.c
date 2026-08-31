@@ -379,7 +379,9 @@ int main(void)
 
     /*
      * restart preserves the Flags-2 transcript bit but resets interpreter-only
-     * replay and command-recording selections to their default states.
+     * replay and command-recording selections to their default states. Keep the
+     * synthetic code outside the 64-byte header because restart legitimately
+     * refreshes interpreter-owned header fields before execution resumes.
      */
     {
         ZMachine vm;
@@ -390,13 +392,15 @@ int main(void)
         assert(fp != NULL);
         fclose(fp);
 
-        vm.memory[0x20U] = 0xF4U; /* input_stream 1 */
-        vm.memory[0x21U] = 0x7FU;
-        vm.memory[0x22U] = 1U;
-        vm.memory[0x23U] = 0xF3U; /* output_stream 4 */
-        vm.memory[0x24U] = 0x7FU;
-        vm.memory[0x25U] = 4U;
-        vm.memory[0x26U] = 0xB7U; /* restart */
+        vm.pc = 0x100U;
+        vm.initial_pc = 0x100U;
+        vm.memory[0x100U] = 0xF4U; /* input_stream 1 */
+        vm.memory[0x101U] = 0x7FU;
+        vm.memory[0x102U] = 1U;
+        vm.memory[0x103U] = 0xF3U; /* output_stream 4 */
+        vm.memory[0x104U] = 0x7FU;
+        vm.memory[0x105U] = 4U;
+        vm.memory[0x106U] = 0xB7U; /* restart */
 
         vm.initial_dynamic_memory_size = vm.static_memory_addr;
         vm.initial_dynamic_memory =
@@ -404,7 +408,7 @@ int main(void)
         assert(vm.initial_dynamic_memory != NULL);
         memcpy(vm.initial_dynamic_memory, vm.memory,
                vm.initial_dynamic_memory_size);
-        vm.initial_dynamic_memory[0x20U] = 0xBAU; /* quit after restart */
+        vm.initial_dynamic_memory[0x100U] = 0xBAU; /* quit after restart */
 
         assert_run_ok(&vm, "restart replay selection");
         assert(vm.state == ZM_STATE_WAITING_STREAM_FILE);

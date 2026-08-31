@@ -188,13 +188,15 @@ static int begin_request(ZMachine *vm, StreamRequestKind kind,
 }
 
 /*
- * Honor direct game writes to Flags 2 bit 0 before transcript text can escape.
+ * Request a transcript path after an executing story selects Flags 2 bit 0.
  *
  * V1/V2 can select stream 2 only through Flags 2, and later versions may use
- * either Flags 2 or output_stream 2. If a story raises the bit without an
- * already chosen transcript file, suspend cooperatively at the current PC so
- * Tcl can supply host filesystem policy. Once a file has been chosen it remains
- * associated with the session, so repeated off/on toggles never reprompt.
+ * either Flags 2 or output_stream 2. The public step wrapper calls this only
+ * after observing a real 0-to-1 transition caused by a delegated instruction.
+ * That distinction is important: restored/restarted interpreter state may
+ * already have bit 0 set and, by invariant, already has its host transcript
+ * resource. Treating every pre-existing bit as a fresh selection would also
+ * make synthetic VM-state tests spuriously request host filesystem policy.
  */
 static int request_transcript_if_needed(ZMachine *vm)
 {
@@ -367,7 +369,7 @@ static int write_decimal_marker(ZMachine *vm, FILE *fp, uint16_t value)
  * V5+ preloaded text is intentionally absent because the Standard says the game,
  * not the interpreter, redisplays that prefix. Stream 4 is different: it records
  * the completed logical command, so it uses the final lower-cased story buffer.
- * A non-Enter terminating key finishes aread without synthesizing a carriage
+ * A non-Enter terminating key finishes a read without synthesizing a carriage
  * return on streams 1/2. Stream 3 suppresses those screen/transcript echoes but
  * does not suppress command recording, which records input rather than story
  * output.
@@ -601,8 +603,8 @@ static int prepare_replay_input(ZMachine *vm)
  * yields for keyboard input, another host request, or termination. Output from
  * multiple replay turns is accumulated so a single Tcl call does not lose text
  * merely because the lower cooperative loop clears its per-run output buffer.
- * Direct Flags-2 transcript requests are converted into the same cooperative
- * host-file request before any subsequent story output can be executed.
+ * Direct Flags-2 transcript selection is handled by the public step wrapper at
+ * the instruction which changes the bit.
  */
 int zmachine_run(ZMachine *vm)
 {
@@ -612,16 +614,8 @@ int zmachine_run(ZMachine *vm)
 
     Tcl_DStringInit(&accumulated);
     for (;;) {
-        rc = request_transcript_if_needed(vm);
-        if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
-            break;
-
         rc = zmachine_run_stream_base(vm);
         if (rc != TCL_OK)
-            break;
-
-        rc = request_transcript_if_needed(vm);
-        if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
             break;
 
         if (vm->state == ZM_STATE_WAITING_INPUT &&
@@ -765,9 +759,10 @@ static int pending_read_char_value(const ZMachine *vm, uint16_t *zscii)
  * Keeping all output-stream selection here guarantees each operand is evaluated
  * exactly once while preserving the existing stream-1 and nested stream-3 rules.
  *
- * A direct write to Flags 2 bit 0 is detected both before and after delegated
- * instructions. The post-check catches storeb/storew/copy_table selection; the
- * pre-check covers initial/restored/restarted header state before text prints.
+ * Delegated instructions are checked for a Flags 2 bit-0 transition. This
+ * catches storeb/storew/copy_table transcript selection while avoiding a false
+ * host-file request merely because a restored/restarted VM already has the bit
+ * set. A legitimate pre-existing selection already has its transcript resource.
  */
 int zmachine_step(ZMachine *vm)
 {
@@ -776,15 +771,14 @@ int zmachine_step(ZMachine *vm)
     char decode_error[128];
     int was_read_char = 0;
     uint16_t read_char_value = 0U;
+    int transcript_was_selected;
     uint32_t old_pc;
     int rc;
 
     if (!vm || !vm->memory)
         return stream_vm_error(vm, "cannot execute without a loaded story");
 
-    rc = request_transcript_if_needed(vm);
-    if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
-        return rc;
+    transcript_was_selected = stream2_selected(vm);
 
     if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
                                      vm->pc, &instruction,
@@ -918,6 +912,7 @@ int zmachine_step(ZMachine *vm)
         note_key_input(vm, read_char_value) != TCL_OK)
         return TCL_ERROR;
     if (rc == TCL_OK && vm->state == ZM_STATE_READY &&
+        !transcript_was_selected && stream2_selected(vm) &&
         request_transcript_if_needed(vm) != TCL_OK)
         return TCL_ERROR;
     return rc;
