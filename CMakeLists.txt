@@ -137,6 +137,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(presentation-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME presentation-opcodes COMMAND presentation-test)
 
+    add_executable(presentation-extended-test tests/presentation_extended.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(presentation-extended-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(presentation-extended-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME presentation-extended-opcodes COMMAND presentation-extended-test)
+
     add_executable(get-child-stack-test tests/get_child_stack.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(get-child-stack-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(get-child-stack-test PRIVATE ${TCL_LIBRARY})
