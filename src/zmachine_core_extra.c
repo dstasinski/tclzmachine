@@ -1,15 +1,16 @@
 /*
  * zmachine_core_extra.c
  *
- * Standards-completeness layer for ordinary control-flow, arithmetic, and
- * host-neutral I/O-selection instructions which are not yet implemented in the
- * original core executor.
+ * Standards-completeness and validation layer for ordinary control-flow,
+ * arithmetic, and host-neutral I/O-selection instructions which are not yet
+ * implemented in the original core executor.
  *
  * This module is deliberately below the text/presentation wrapper. It recognizes
- * only the small set it owns, resolves their operands exactly once, and delegates
- * every other instruction untouched to zmachine_exec.c. Keeping operand
- * resolution local to a handled instruction is essential because reading
- * variable 0 pops the evaluation stack.
+ * only the small set it owns, validates the operand shapes expected by the older
+ * executor, resolves owned operands exactly once, and delegates every other valid
+ * instruction untouched to zmachine_exec.c. Keeping operand resolution local to
+ * a handled instruction is essential because reading variable 0 pops the
+ * evaluation stack.
  *
  * catch/throw use the standard frame cookie: the number of routine frames
  * currently on the system stack. throw discards newer frames, then returns from
@@ -57,6 +58,100 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
         return TCL_ERROR;
 
     vm->pc = store_pc + 1U;
+    return TCL_OK;
+}
+
+/*
+ * Validate operand counts for opcodes delegated to the original executor.
+ *
+ * Long and short encodings structurally guarantee their normal fixed operand
+ * counts, but variable-form 2OP instructions carry an explicit operand-type byte.
+ * Malformed story data can therefore omit operands while still decoding as a 2OP
+ * opcode. The original executor predates this hardening layer and directly reads
+ * values[1], or values[2] for several VAR opcodes. Reject impossible arities here
+ * so corrupt Z-code produces a deterministic VM error instead of reading an
+ * uninitialized temporary operand.
+ *
+ * `je` is the one base 2OP exception: it accepts two through four operands and
+ * compares the first against each later value. Call-family VAR opcodes accept
+ * their documented argument ranges; fixed-shape memory/output operations require
+ * exactly the listed operands.
+ */
+static int validate_delegated_arity(ZMachine *vm,
+                                    const ZMachineInstruction *instruction)
+{
+    uint8_t count;
+
+    if (!vm || !instruction)
+        return core_extra_error(vm, "invalid opcode arity validation request");
+
+    count = instruction->operand_count_actual;
+
+    if (instruction->operand_count == ZM_OPERANDS_2OP &&
+        instruction->opcode_number >= 1U &&
+        instruction->opcode_number <= 26U) {
+        if (instruction->opcode_number == 1U) {
+            if (count < 2U || count > 4U)
+                return core_extra_error(vm,
+                                        "je requires between two and four operands");
+        } else if (count != 2U) {
+            return core_extra_error(vm,
+                                    "2OP instruction requires exactly two operands");
+        }
+        return TCL_OK;
+    }
+
+    if (instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return TCL_OK;
+
+    switch (instruction->opcode_number) {
+    case 0U: /* call_vs: routine plus up to three arguments */
+        if (count < 1U || count > 4U)
+            return core_extra_error(vm, "call_vs requires one to four operands");
+        break;
+
+    case 1U: /* storew */
+    case 2U: /* storeb */
+    case 3U: /* put_prop */
+        if (count != 3U)
+            return core_extra_error(vm,
+                                    "three-operand VAR instruction has invalid arity");
+        break;
+
+    case 5U: /* print_char */
+    case 6U: /* print_num */
+    case 8U: /* push */
+    case 9U: /* pull in supported non-V6 versions */
+        if (count != 1U)
+            return core_extra_error(vm,
+                                    "single-operand VAR instruction has invalid arity");
+        break;
+
+    case 12U: /* call_vs2: routine plus up to seven arguments */
+        if (vm->version >= 4U && (count < 1U || count > 8U))
+            return core_extra_error(vm, "call_vs2 requires one to eight operands");
+        break;
+
+    case 25U: /* call_vn: routine plus up to three arguments */
+        if (vm->version >= 5U && (count < 1U || count > 4U))
+            return core_extra_error(vm, "call_vn requires one to four operands");
+        break;
+
+    case 26U: /* call_vn2: routine plus up to seven arguments */
+        if (vm->version >= 5U && (count < 1U || count > 8U))
+            return core_extra_error(vm, "call_vn2 requires one to eight operands");
+        break;
+
+    case 29U: /* copy_table */
+        if (vm->version >= 5U && count != 3U)
+            return core_extra_error(vm, "copy_table requires exactly three operands");
+        break;
+
+    default:
+        break;
+    }
+
     return TCL_OK;
 }
 
@@ -160,11 +255,12 @@ static uint16_t arithmetic_shift(uint16_t number, int16_t places)
 /*
  * Execute one instruction through the pure-core completeness layer.
  *
- * Unrecognized instructions delegate before operand resolution. Owned
- * operations are then validated and evaluated according to their exact opcode
- * contracts. The Standard leaves shifts outside -15..+15 undefined; this
- * runtime rejects them deterministically rather than invoking undefined C
- * shifts or silently inventing semantics.
+ * Every decoded instruction first receives the narrow arity validation required
+ * to protect the older delegated executor. Unrecognized valid instructions then
+ * delegate before operand resolution. Owned operations are evaluated according
+ * to their exact opcode contracts. The Standard leaves shifts outside -15..+15
+ * undefined; this runtime rejects them deterministically rather than invoking
+ * undefined C shifts or silently inventing semantics.
  */
 int zmachine_step_core(ZMachine *vm)
 {
@@ -181,6 +277,9 @@ int zmachine_step_core(ZMachine *vm)
         return core_extra_error(vm, decode_error[0] ? decode_error :
                                 "unable to decode Z-machine instruction");
     }
+
+    if (validate_delegated_arity(vm, &instruction) != TCL_OK)
+        return TCL_ERROR;
 
     if (!owns_instruction(vm, &instruction))
         return zmachine_step_core_base(vm);
