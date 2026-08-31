@@ -1,0 +1,214 @@
+/*
+ * zmachine_key.c
+ *
+ * Numeric ZSCII keypress support for the cooperative read_char path.
+ *
+ * `zmachine::command` remains the line-oriented Tcl/IRC API. A separate key API
+ * queues one exact ZSCII input code so cursor/function/extra characters do not
+ * need to be guessed from a UTF-8 command string. Numeric keys are represented
+ * internally as a two-byte pending-input sentinel (NUL, ZSCII); ordinary
+ * `zmachine_supply_input()` uses a NUL-terminated C string and therefore cannot
+ * create that representation accidentally.
+ *
+ * This module is an instruction-dispatch layer between lexical opcodes and the
+ * existing presentation wrapper. It consumes only read_char when a numeric key
+ * is pending and delegates every other instruction unchanged.
+ */
+
+#include "tclzmachine.h"
+#include "zmachine_decode.h"
+#include "zmachine_exec.h"
+
+#include <stdio.h>
+
+/* Existing presentation wrapper, immediately below this input layer. */
+extern int zmachine_step_present(ZMachine *vm);
+
+#define ZM_DEFAULT_EXTRA_FIRST 155U
+#define ZM_DEFAULT_EXTRA_LAST 223U
+#define ZM_EXTRA_LAST 251U
+
+/* Record a host/API diagnostic without destroying an otherwise resumable VM. */
+static int key_api_error(ZMachine *vm, const char *message)
+{
+    if (vm)
+        snprintf(vm->error, sizeof(vm->error), "%s", message);
+    return TCL_ERROR;
+}
+
+/* Put the VM into its terminal error state for malformed executing Z-code. */
+static int key_vm_error(ZMachine *vm, const char *message)
+{
+    if (vm) {
+        vm->state = ZM_STATE_ERROR;
+        snprintf(vm->error, sizeof(vm->error), "%s", message);
+    }
+    return TCL_ERROR;
+}
+
+static uint16_t read_be16(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+/*
+ * Return whether one extra-character ZSCII code is defined by this story.
+ *
+ * V1-V4 and V5+ stories without a usable custom Unicode table use the Standard
+ * default mapping, which defines 155..223. A V5+ header-extension word 3 may
+ * instead select a counted table defining an arbitrary prefix of 155..251.
+ */
+static int extra_input_defined(const ZMachine *vm, uint16_t zscii)
+{
+    uint16_t extension_words;
+    uint16_t table;
+    uint8_t count;
+    size_t index;
+
+    if (!vm || !vm->memory ||
+        zscii < ZM_DEFAULT_EXTRA_FIRST || zscii > ZM_EXTRA_LAST)
+        return 0;
+
+    if (vm->version <= 4U || vm->header_extension_addr == 0U)
+        return zscii <= ZM_DEFAULT_EXTRA_LAST;
+
+    if ((size_t)vm->header_extension_addr + 1U >= vm->memory_size)
+        return 0;
+    extension_words = read_be16(vm->memory + vm->header_extension_addr);
+    if (extension_words < 3U)
+        return zscii <= ZM_DEFAULT_EXTRA_LAST;
+
+    if ((size_t)vm->header_extension_addr + 7U >= vm->memory_size)
+        return 0;
+    table = read_be16(vm->memory + vm->header_extension_addr + 6U);
+    if (table == 0U)
+        return zscii <= ZM_DEFAULT_EXTRA_LAST;
+    if ((size_t)table >= vm->memory_size)
+        return 0;
+
+    count = vm->memory[table];
+    if (count > 97U ||
+        (size_t)table + 1U + (size_t)count * 2U > vm->memory_size)
+        return 0;
+
+    index = (size_t)(zscii - ZM_DEFAULT_EXTRA_FIRST);
+    return index < count;
+}
+
+/* Return nonzero exactly for key codes this non-V6 runtime can deliver. */
+static int zscii_input_defined(const ZMachine *vm, uint16_t zscii)
+{
+    if (zscii == 8U || zscii == 13U || zscii == 27U)
+        return 1;
+    if (zscii >= 32U && zscii <= 126U)
+        return 1;
+    if (zscii >= 129U && zscii <= 154U)
+        return 1;
+    if (zscii >= 155U && zscii <= 251U)
+        return extra_input_defined(vm, zscii);
+
+    /* Menu click 252 is Version-6-only; V6 is intentionally unsupported. */
+    if (vm && vm->version >= 5U && (zscii == 253U || zscii == 254U))
+        return 1;
+    return 0;
+}
+
+/* Decode whether the VM is currently suspended on VAR:22 read_char. */
+static int current_is_read_char(ZMachine *vm, ZMachineInstruction *instruction)
+{
+    char decode_error[128];
+
+    if (!vm || !vm->memory || vm->version < 4U)
+        return 0;
+    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
+                                     vm->pc, instruction,
+                                     decode_error, sizeof(decode_error)))
+        return 0;
+
+    return instruction->form == ZM_FORM_VARIABLE &&
+           instruction->operand_count == ZM_OPERANDS_VAR &&
+           instruction->opcode_number == 22U;
+}
+
+/* Queue one exact numeric ZSCII key for a currently suspended read_char. */
+int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
+{
+    ZMachineInstruction instruction;
+    char encoded[2];
+
+    if (!vm || !vm->memory)
+        return TCL_ERROR;
+    if (vm->state != ZM_STATE_WAITING_INPUT)
+        return key_api_error(vm, "Z-machine session is not waiting for character input");
+    if (!current_is_read_char(vm, &instruction))
+        return key_api_error(vm, "Z-machine session is waiting for line input, not read_char");
+    if (!zscii_input_defined(vm, zscii))
+        return key_api_error(vm, "invalid or undefined ZSCII input key");
+
+    encoded[0] = '\0';
+    encoded[1] = (char)(uint8_t)zscii;
+    Tcl_DStringSetLength(&vm->pending_input, 0);
+    Tcl_DStringAppend(&vm->pending_input, encoded, 2);
+    vm->input_available = 1;
+    vm->state = ZM_STATE_READY;
+    vm->error[0] = '\0';
+    return TCL_OK;
+}
+
+/* Return nonzero and decode the sentinel when a numeric key is pending. */
+static int pending_numeric_key(const ZMachine *vm, uint16_t *zscii)
+{
+    const unsigned char *data;
+
+    if (!vm || !zscii || !vm->input_available ||
+        Tcl_DStringLength(&vm->pending_input) != 2)
+        return 0;
+
+    data = (const unsigned char *)Tcl_DStringValue(&vm->pending_input);
+    if (data[0] != 0U)
+        return 0;
+
+    *zscii = data[1];
+    return 1;
+}
+
+/* Execute one instruction through the numeric-key input layer. */
+int zmachine_step_input(ZMachine *vm)
+{
+    ZMachineInstruction instruction;
+    uint16_t values[ZM_MAX_OPERANDS];
+    uint16_t zscii;
+    uint8_t store_variable;
+
+    if (!vm || !vm->memory)
+        return key_vm_error(vm, "cannot execute without a loaded story");
+
+    if (!pending_numeric_key(vm, &zscii))
+        return zmachine_step_present(vm);
+
+    if (!current_is_read_char(vm, &instruction))
+        return key_vm_error(vm, "numeric key was queued outside read_char");
+    if (instruction.operand_count_actual < 1U)
+        return key_vm_error(vm, "read_char is missing its input-device operand");
+
+    if (zmachine_resolve_operands(vm, &instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+    if (values[0] != 1U)
+        return key_vm_error(vm, "read_char requested an unsupported input device");
+    if (instruction.operand_count_actual >= 2U && values[1] != 0U)
+        return key_vm_error(vm, "timed read_char is not yet supported");
+    if (instruction.operand_count_actual >= 3U && values[2] != 0U)
+        return key_vm_error(vm, "timed read_char callback is not yet supported");
+    if ((size_t)instruction.next_pc >= vm->memory_size)
+        return key_vm_error(vm, "truncated read_char store variable");
+
+    store_variable = vm->memory[instruction.next_pc];
+    if (zmachine_variable_write(vm, store_variable, 0, zscii) != TCL_OK)
+        return TCL_ERROR;
+
+    Tcl_DStringSetLength(&vm->pending_input, 0);
+    vm->input_available = 0;
+    vm->pc = instruction.next_pc + 1U;
+    return TCL_OK;
+}
