@@ -11,6 +11,11 @@
  * `tokenise` and `encode_text` opcodes so read-time parsing and explicit
  * dictionary encoding cannot drift. It intentionally contains no terminal,
  * filesystem, or IRC behavior.
+ *
+ * Story buffers are validated before mutation. This matters for malformed
+ * stories: a text buffer crossing static memory or a truncated parse buffer must
+ * fail without leaving half of a word, a reset parse count, or part of the new
+ * command behind in dynamic memory.
  */
 
 #include "tclzmachine.h"
@@ -26,6 +31,33 @@ static uint16_t be16(const uint8_t *p)
 }
 
 /*
+ * Return nonzero only when an entire byte range is writable dynamic memory.
+ *
+ * The subtraction form avoids address+length overflow. Dynamic memory ends at
+ * the earlier of the loaded image size and the story's static-memory boundary.
+ * A zero-length range is valid at any address up to that boundary.
+ */
+static int dynamic_range_writable(const ZMachine *vm,
+                                  uint32_t address,
+                                  size_t length)
+{
+    size_t start;
+    size_t limit;
+
+    if (!vm || !vm->memory)
+        return 0;
+
+    start = (size_t)address;
+    limit = vm->memory_size;
+    if ((size_t)vm->static_memory_addr < limit)
+        limit = (size_t)vm->static_memory_addr;
+
+    if (start > limit)
+        return 0;
+    return length <= limit - start;
+}
+
+/*
  * Write one byte to story dynamic memory.
  *
  * Z-machine input buffers and parse buffers are writable story structures, so
@@ -33,20 +65,28 @@ static uint16_t be16(const uint8_t *p)
  */
 static int write_byte(ZMachine *vm, uint32_t addr, uint8_t value)
 {
-    if (!vm || !vm->memory || addr >= vm->memory_size ||
-        addr >= vm->static_memory_addr)
+    if (!dynamic_range_writable(vm, addr, 1U))
         return TCL_ERROR;
 
     vm->memory[addr] = value;
     return TCL_OK;
 }
 
-/* Write one big-endian 16-bit word to story dynamic memory. */
+/*
+ * Write one big-endian word atomically with respect to bounds validation.
+ *
+ * Validate both destination bytes before changing either one. The previous
+ * byte-at-a-time implementation could modify the high byte and only then learn
+ * that the low byte crossed into static or unmapped memory.
+ */
 static int write_word(ZMachine *vm, uint32_t addr, uint16_t value)
 {
-    if (write_byte(vm, addr, (uint8_t)(value >> 8)) != TCL_OK)
+    if (!dynamic_range_writable(vm, addr, 2U))
         return TCL_ERROR;
-    return write_byte(vm, addr + 1U, (uint8_t)value);
+
+    vm->memory[addr] = (uint8_t)(value >> 8);
+    vm->memory[addr + 1U] = (uint8_t)value;
+    return TCL_OK;
 }
 
 /*
@@ -217,6 +257,84 @@ static int is_separator(const ZMachine *vm,
 }
 
 /*
+ * Count parse tokens without mutating the parse buffer.
+ *
+ * This first pass mirrors only the delimiter rules needed to determine how many
+ * four-byte slots the second pass can actually touch. It deliberately limits
+ * itself to max_words, just like real tokenization. We do not demand that all
+ * max_words advertised slots fit in memory: early Infocom/Inform stories are
+ * known to advertise 240 slots in a 240-byte parse array. Validating only the
+ * minimum six bytes plus slots needed by this input preserves that historical
+ * compatibility while still making every actual write range safe.
+ */
+static size_t count_parse_tokens(const ZMachine *vm,
+                                 uint16_t dictionary_addr,
+                                 const char *line,
+                                 size_t len,
+                                 uint8_t max_words)
+{
+    size_t i = 0U;
+    size_t count = 0U;
+
+    while (i < len && count < max_words) {
+        while (i < len && line[i] == ' ')
+            ++i;
+        if (i >= len)
+            break;
+
+        if (is_separator(vm, dictionary_addr, (unsigned char)line[i])) {
+            ++i;
+        } else {
+            while (i < len && line[i] != ' ' &&
+                   !is_separator(vm, dictionary_addr,
+                                 (unsigned char)line[i]))
+                ++i;
+        }
+        ++count;
+    }
+
+    return count;
+}
+
+/*
+ * Validate a parse buffer before any text or parse-buffer mutation occurs.
+ *
+ * A nonzero parse buffer must be capable of holding at least one standard
+ * four-byte entry plus its two-byte header (six bytes total), matching the
+ * Standard's requested malformed-buffer diagnostic. For the current line we
+ * additionally prove that every slot which tokenization can actually write is
+ * entirely inside dynamic memory.
+ */
+static int validate_parse_buffer(const ZMachine *vm,
+                                 uint16_t parse_buffer,
+                                 const char *line,
+                                 size_t len,
+                                 uint16_t dictionary_addr)
+{
+    uint8_t max_words;
+    size_t token_count;
+    size_t required;
+
+    if (parse_buffer == 0U)
+        return TCL_OK;
+    if (!dynamic_range_writable(vm, parse_buffer, 6U))
+        return TCL_ERROR;
+
+    max_words = vm->memory[parse_buffer];
+    if (max_words == 0U)
+        return TCL_ERROR;
+
+    token_count = count_parse_tokens(vm, dictionary_addr,
+                                     line, len, max_words);
+    required = 2U + token_count * 4U;
+    if (required < 6U)
+        required = 6U;
+
+    return dynamic_range_writable(vm, parse_buffer, required) ?
+           TCL_OK : TCL_ERROR;
+}
+
+/*
  * Split one input line into dictionary tokens and fill the parse buffer.
  *
  * Spaces delimit ordinary words but are not themselves tokens. A dictionary
@@ -243,7 +361,9 @@ static int tokenize(ZMachine *vm,
     /* A zero parse-buffer address is harmless for read's optional parse arg. */
     if (parse_buffer == 0U)
         return TCL_OK;
-    if ((size_t)parse_buffer + 1U >= vm->memory_size)
+
+    if (validate_parse_buffer(vm, parse_buffer, line, len,
+                              dictionary_addr) != TCL_OK)
         return TCL_ERROR;
 
     max_words = vm->memory[parse_buffer];
@@ -303,6 +423,10 @@ static int tokenize(ZMachine *vm,
  * and terminate the text with zero. V5+ retain the maximum in byte 0, store
  * the actual character count in byte 1, and begin text at byte 2. The input is
  * truncated to the story-advertised capacity before it is written.
+ *
+ * Both text and parse destinations are completely validated before either is
+ * modified. On failure, pending Tcl input remains available to the host and the
+ * story sees its previous buffer contents unchanged.
  */
 int zmachine_input_read_line(ZMachine *vm,
                              uint16_t text_buffer,
@@ -311,11 +435,12 @@ int zmachine_input_read_line(ZMachine *vm,
 {
     const char *line;
     size_t len, i, max_chars;
+    size_t text_required;
     uint8_t offset;
 
     if (!vm || !vm->memory || !vm->input_available)
         return TCL_ERROR;
-    if ((size_t)text_buffer >= vm->memory_size)
+    if (!dynamic_range_writable(vm, text_buffer, 1U))
         return TCL_ERROR;
 
     line = Tcl_DStringValue(&vm->pending_input);
@@ -323,16 +448,38 @@ int zmachine_input_read_line(ZMachine *vm,
     max_chars = vm->memory[text_buffer];
 
     if (vm->version <= 4U) {
-        /* V1-V4 include room for the terminating zero in the advertised size. */
-        if (max_chars > 0U)
-            --max_chars;
+        /*
+         * Byte 0=n implies an n+1-byte physical buffer and room for at most
+         * n-1 typed characters plus the terminating zero. n<2 therefore means
+         * the described buffer is shorter than the Standard's three-byte
+         * minimum and is treated as malformed.
+         */
+        if (max_chars < 2U)
+            return TCL_ERROR;
+        --max_chars;
         offset = 1U;
+        if (len > max_chars)
+            len = max_chars;
+        text_required = 2U + len; /* size byte + text + zero terminator */
     } else {
+        /* V5+ needs byte 0, byte 1 count, and at least one text byte of space. */
+        if (max_chars < 1U)
+            return TCL_ERROR;
         offset = 2U;
+        if (len > max_chars)
+            len = max_chars;
+        text_required = 2U + len; /* size byte + count byte + actual text */
     }
 
-    if (len > max_chars)
-        len = max_chars;
+    if (text_required < 3U)
+        text_required = 3U;
+    if (!dynamic_range_writable(vm, text_buffer, text_required))
+        return TCL_ERROR;
+
+    /* Validate parse capacity before changing the text buffer at all. */
+    if (validate_parse_buffer(vm, parse_buffer, line, len,
+                              vm->dictionary_addr) != TCL_OK)
+        return TCL_ERROR;
 
     /* Dictionary input is case-insensitive; store a lower-case copy. */
     for (i = 0U; i < len; ++i) {
@@ -419,8 +566,7 @@ int zmachine_input_encode_text(ZMachine *vm,
     source = (uint32_t)zscii_text + (uint32_t)from;
     if ((size_t)source + length > vm->memory_size)
         return TCL_ERROR;
-    if ((size_t)coded_text + sizeof(encoded) > vm->memory_size ||
-        (size_t)coded_text + sizeof(encoded) > (size_t)vm->static_memory_addr)
+    if (!dynamic_range_writable(vm, coded_text, sizeof(encoded)))
         return TCL_ERROR;
 
     encode_dictionary_word(vm->version, vm->memory + source, length,
