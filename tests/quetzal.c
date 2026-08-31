@@ -41,6 +41,8 @@ static void init_vm(ZMachine *vm)
     vm->static_memory_addr = 0x200U;
     vm->globals_addr = 0x100U;
     vm->release_number = 0x1234U;
+    vm->header_file_length_word = 0x0100U; /* V5 scale 4 => 1024 bytes. */
+    vm->declared_file_length = 1024U;
     vm->checksum = 0x5678U;
     vm->state = ZM_STATE_READY;
     vm->output_stream1_enabled = 1;
@@ -52,6 +54,7 @@ static void init_vm(ZMachine *vm)
     put_word(vm->memory, 0x0cU, vm->globals_addr);
     put_word(vm->memory, 0x0eU, vm->static_memory_addr);
     memcpy(vm->memory + 0x12U, "260830", 6U);
+    put_word(vm->memory, 0x1aU, vm->header_file_length_word);
     put_word(vm->memory, 0x1cU, vm->checksum);
 
     /* Full-game V5 save/restore, both with no optional auxiliary operands. */
@@ -64,6 +67,17 @@ static void init_vm(ZMachine *vm)
     vm->memory[0x41U] = 1U;
     vm->memory[0x42U] = 0xffU;
     vm->memory[0x43U] = 0x11U;
+
+    /* Additional requests used to verify explicit host cancellation. */
+    vm->memory[0x60U] = 0xbeU;
+    vm->memory[0x61U] = 0U;
+    vm->memory[0x62U] = 0xffU;
+    vm->memory[0x63U] = 0x13U;
+
+    vm->memory[0x70U] = 0xbeU;
+    vm->memory[0x71U] = 1U;
+    vm->memory[0x72U] = 0xffU;
+    vm->memory[0x73U] = 0x14U;
 
     vm->initial_dynamic_memory_size = vm->static_memory_addr;
     vm->initial_dynamic_memory =
@@ -154,7 +168,6 @@ int main(void)
         uint16_t locals[2] = {0xaaaaU, 0xbbbbU};
         init_vm(&vm);
 
-        /* Build both top-level and current-routine evaluation stack content. */
         assert(zmachine_stack_push(&vm, 0x1111U) == TCL_OK);
         assert(zmachine_frame_push(&vm, 0x90U, 0x12U, 0,
                                    locals, 2U, 0x03U) == TCL_OK);
@@ -173,7 +186,6 @@ int main(void)
         assert(vm.pc == 0x34U);
         assert(get_word(vm.memory, 0x100U) == 1U);
 
-        /* Change state after the save; restore must roll back only state of play. */
         vm.memory[0x180U] = 0xbbU;
         vm.stack[0] = 0x9999U;
         vm.stack[1] = 0x8888U;
@@ -202,11 +214,25 @@ int main(void)
         assert(vm.frames[0].locals[1] == 0xbbbbU);
         assert(vm.frames[0].argument_mask == 0x03U);
 
-        /* Flags 2 and interpreter state are not rolled back by restore. */
         assert(get_word(vm.memory, 0x10U) == 0xa55aU);
         assert(vm.flags2 == 0xa55aU);
         assert(vm.random_state == 0x22222222U);
         assert(vm.current_window == 2U);
+
+        /* Declining either host-file request completes the opcode with zero. */
+        vm.pc = 0x60U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_WAITING_SAVE);
+        assert(zmachine_cancel_file(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_READY && vm.pc == 0x64U);
+        assert(get_word(vm.memory, 0x106U) == 0U);
+
+        vm.pc = 0x70U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_WAITING_RESTORE);
+        assert(zmachine_cancel_file(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_READY && vm.pc == 0x74U);
+        assert(get_word(vm.memory, 0x108U) == 0U);
 
         free_vm(&vm);
     }
