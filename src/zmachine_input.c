@@ -8,8 +8,9 @@
  * into the exact text-buffer representation expected by the active Z-machine
  * version, lowercases it for dictionary matching, and optionally fills the
  * story's parse buffer. The same lexical engine is also exposed to the V5+
- * `tokenise` opcode so read-time parsing and explicit parsing cannot drift.
- * It intentionally contains no terminal, filesystem, or IRC behavior.
+ * `tokenise` and `encode_text` opcodes so read-time parsing and explicit
+ * dictionary encoding cannot drift. It intentionally contains no terminal,
+ * filesystem, or IRC behavior.
  */
 
 #include "tclzmachine.h"
@@ -75,15 +76,19 @@ static int alphabet_index(unsigned char c, uint8_t *zchar)
 }
 
 /*
- * Encode a token into the fixed-width dictionary key format.
+ * Encode bytes into the fixed-width dictionary key format.
  *
  * V1-V3 dictionaries compare the first 6 Z-characters, stored in two words
  * (4 bytes). V4+ compare 9 Z-characters in three words (6 bytes). Unused
  * positions are padded with Z-character 5, and the high bit of the final word
- * marks the end of the encoded string.
+ * marks the end of the encoded string. An explicit source length is used so
+ * encode_text can process a non-NUL-terminated story-memory slice exactly.
  */
-static void encode_dictionary_word(uint8_t version, const char *word,
-                                   uint8_t *out, size_t out_len)
+static void encode_dictionary_word(uint8_t version,
+                                   const uint8_t *word,
+                                   size_t word_len,
+                                   uint8_t *out,
+                                   size_t out_len)
 {
     uint8_t zchars[9];
     size_t zmax = version <= 3 ? 6U : 9U;
@@ -92,8 +97,8 @@ static void encode_dictionary_word(uint8_t version, const char *word,
 
     memset(zchars, 5, sizeof(zchars));
 
-    for (i = 0U; word[i] && zi < zmax; ++i) {
-        unsigned char c = (unsigned char)tolower((unsigned char)word[i]);
+    for (i = 0U; i < word_len && zi < zmax; ++i) {
+        unsigned char c = (unsigned char)tolower(word[i]);
         uint8_t z;
         int alphabet = alphabet_index(c, &z);
 
@@ -172,7 +177,9 @@ static uint16_t dictionary_lookup(const ZMachine *vm,
         return 0U;
 
     memset(encoded, 0, sizeof(encoded));
-    encode_dictionary_word(vm->version, word, encoded, key_len);
+    encode_dictionary_word(vm->version,
+                           (const uint8_t *)word, strlen(word),
+                           encoded, key_len);
 
     for (i = 0; i < entry_count; ++i) {
         uint32_t addr = entries + (uint32_t)i * entry_len;
@@ -393,4 +400,35 @@ int zmachine_input_tokenize_buffer(ZMachine *vm,
                     (const char *)(vm->memory + text_start),
                     len, 2U, dictionary_addr,
                     preserve_unrecognized != 0);
+}
+
+/* Encode an explicit V5+ ZSCII memory slice into a six-byte dictionary key. */
+int zmachine_input_encode_text(ZMachine *vm,
+                               uint16_t zscii_text,
+                               uint16_t length,
+                               uint16_t from,
+                               uint16_t coded_text)
+{
+    uint8_t encoded[6];
+    uint32_t source;
+    size_t i;
+
+    if (!vm || !vm->memory || vm->version < 5U)
+        return TCL_ERROR;
+
+    source = (uint32_t)zscii_text + (uint32_t)from;
+    if ((size_t)source + length > vm->memory_size)
+        return TCL_ERROR;
+    if ((size_t)coded_text + sizeof(encoded) > vm->memory_size ||
+        (size_t)coded_text + sizeof(encoded) > (size_t)vm->static_memory_addr)
+        return TCL_ERROR;
+
+    encode_dictionary_word(vm->version, vm->memory + source, length,
+                           encoded, sizeof(encoded));
+    for (i = 0U; i < sizeof(encoded); ++i) {
+        if (write_byte(vm, (uint32_t)coded_text + (uint32_t)i,
+                       encoded[i]) != TCL_OK)
+            return TCL_ERROR;
+    }
+    return TCL_OK;
 }
