@@ -7,10 +7,13 @@
  * data: the interpreter must rewrite them after loading, restarting, and
  * restoring so the game sees the capabilities of the interpreter which is
  * actually running it. tclzmachine intentionally exposes a conservative
- * text-only environment: no graphical colours, pictures, mouse, sound, timed
- * keyboard input, or selectable text styles are advertised. One-level undo is
- * implemented, so a story's request for undo is left intact rather than being
- * cleared.
+ * text-only environment: no pictures, mouse, sound, timed keyboard input, or
+ * fixed-pitch font are advertised. Plain Tcl output also advertises no colour
+ * or selectable emphasis. When the host explicitly enables mIRC presentation,
+ * colour plus bold and italic become real output capabilities and are advertised
+ * to the story; reverse video remains available through set_text_style without
+ * a separate header capability bit. One-level undo is implemented, so a story's
+ * request for undo is left intact rather than being cleared.
  *
  * The formal Standards revision bytes remain 0.0. The Z-machine Standard says
  * an interpreter should advertise revision n.m only when it obeys that revision
@@ -92,11 +95,22 @@ void zmachine_refresh_interpreter_header(ZMachine *vm)
         flags1 &= (uint8_t)~0x20U;
         flags1 &= (uint8_t)~0x40U;
     } else if (vm->version >= 4U) {
-        /* Bold, italic, fixed-space style and timed input are not available. */
-        flags1 &= (uint8_t)~(0x04U | 0x08U | 0x10U | 0x80U);
+        /* Fixed-space style and timed input are unavailable in every format. */
+        flags1 &= (uint8_t)~(0x10U | 0x80U);
 
-        if (vm->version >= 5U)
-            flags1 &= (uint8_t)~0x01U; /* No visible colours. */
+        if (vm->mirc_output_enabled) {
+            /* mIRC has genuine bold and italic control codes. */
+            flags1 |= (uint8_t)(0x04U | 0x08U);
+        } else {
+            flags1 &= (uint8_t)~(0x04U | 0x08U);
+        }
+
+        if (vm->version >= 5U) {
+            if (vm->mirc_output_enabled)
+                flags1 |= 0x01U;  /* mIRC foreground/background colours. */
+            else
+                flags1 &= (uint8_t)~0x01U;
+        }
         if (vm->version >= 6U)
             flags1 &= (uint8_t)~(0x02U | 0x20U); /* No pictures/sound. */
     }
@@ -107,6 +121,8 @@ void zmachine_refresh_interpreter_header(ZMachine *vm)
          * and (V6+) menus must be cleared when those facilities are unavailable.
          * Bit 4 (undo) remains untouched because save_undo/restore_undo work.
          * Bit 0 (transcripting) is live session state and also remains untouched.
+         * Bit 6 (colours requested by the story) is deliberately preserved: when
+         * mIRC presentation is enabled the interpreter can now honor that request.
          */
         flags2 &= (uint16_t)~(0x0008U | 0x0020U | 0x0080U);
         if (vm->version >= 6U)
@@ -144,7 +160,7 @@ void zmachine_refresh_interpreter_header(ZMachine *vm)
         vm->memory[0x26U] = 1U; /* width of '0' in units */
         vm->memory[0x27U] = 1U; /* font height in units */
 
-        /* Provide deterministic monochrome defaults even though colour is off. */
+        /* Deterministic defaults used when a story explicitly selects default. */
         vm->memory[0x2cU] = 2U; /* black background */
         vm->memory[0x2dU] = 9U; /* white foreground */
     }
