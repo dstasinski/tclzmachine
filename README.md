@@ -21,7 +21,7 @@ The intended VM compatibility target is:
 
 V6 is excluded because its presentation model is unusually screen-oriented and does not fit the project's IRC/text-only purpose. V7 and V8 are retained because their VM model follows the V5 text-oriented model while extending address/file-size rules useful for larger Z-code games.
 
-The interpreter does not expose graphics, cursor positioning, mouse input, sound, fonts, colors, menus, or rich terminal layout. Where a supported story uses presentation opcodes that can safely degrade to plain text, the runtime should preserve meaningful textual output and discard presentation details.
+The interpreter does not expose graphics, cursor positioning, mouse input, sound, fonts, menus, or rich terminal layout. Canonical VM output is always plain UTF-8. A Tcl host may optionally select mIRC presentation, in which case Z-machine foreground/background colours plus bold, italic, and reverse styles are translated to IRC control codes while the underlying canonical text remains unchanged. Fixed-pitch style has no useful IRC equivalent and remains visually neutral.
 
 ## Current status
 
@@ -48,12 +48,13 @@ The runtime now contains a working execution core rather than only starter scaff
 - restart, verify, random, scan-table, argument-count, and related compatibility behavior
 - form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
 - text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
+- optional per-session mIRC rendering of Z-machine standard/true colours and bold, italic, and reverse text styles while retaining plain canonical VM output
 - dynamically allocated one-level `save_undo` / `restore_undo` state restoration
 - cooperative full-game save/restore with Quetzal FORM IFZS persistence
 - V5+ operand-bearing auxiliary save/restore byte-region files
 - Quetzal UMem writing plus UMem and compressed CMem restore support
-- optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, external/auxiliary files, presentation, tokenization, wrapping, and operand-side-effect behavior
+- optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads, including formatting-aware wrapping in mIRC mode
+- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, external/auxiliary files, presentation, mIRC rendering, tokenization, wrapping, and operand-side-effect behavior
 - repository-owned V3 and V5 end-to-end Tcl integration stories, including full-game save/restore
 - manual real-story compatibility probes
 
@@ -115,11 +116,12 @@ puts $info
 
 `inputRequest` is empty when no cooperative input is pending, `line` while the session is suspended on `read`/`sread`/`aread`, and `char` while it is suspended on `read_char`. This lets an embedding bot choose between `zmachine::command` and `zmachine::key` without decoding VM instructions itself.
 
-External Z-machine stream state is reported through:
+External Z-machine stream and presentation state is reported through:
 
 - `streamRequest` - empty normally, or `replay`, `transcript`, or `record` while the story is waiting for a host path
 - `inputStream` - `0` for interactive Tcl input or `1` while command-file replay is selected
 - `commandRecording` - boolean indicating whether output stream 4 is currently recording commands/key presses
+- `outputFormat` - `plain` by default, or `mirc` when IRC formatting output is selected
 
 `fileRequest` is independent of those stream fields. It is empty during ordinary play and becomes `save` or `restore` when the story has yielded for save/restore file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
 
@@ -131,6 +133,27 @@ For auxiliary requests, the same dictionary also exposes:
 - `fileBytes` - the requested maximum byte count
 
 The embedding application remains responsible for translating all filename requests into safe host paths.
+
+### mIRC colour and text-style output
+
+Plain output remains the default. For an IRC bot which understands traditional mIRC formatting controls, enable the optional renderer after creating the session and before beginning play:
+
+```tcl
+zmachine::configure game1 -format mirc
+```
+
+Query or restore the setting with:
+
+```tcl
+puts [zmachine::configure game1 -format]
+zmachine::configure game1 -format plain
+```
+
+When mIRC output is selected, the interpreter advertises colour, bold, and italic capability to the story and translates the story's presentation state into IRC controls. Standard Z-machine colours map to the traditional mIRC palette: black `01`, red `04`, green `03`, yellow `08`, blue `02`, magenta `06`, cyan `10`, and white `00`. `set_true_colour` values are approximated to the nearest available traditional mIRC colour, which is permitted by the Z-machine Standard when the requested colour cannot be reproduced exactly.
+
+`set_text_style` maps bold, italic, and reverse video to their corresponding mIRC control codes. Fixed-pitch is tracked so Z-machine state remains coherent but has no IRC rendering effect. Roman/default style clears active emphasis. Formatting is reset at physical line boundaries and re-established where needed so newline-delimited output can be sent as independent IRC messages without style leakage into later bot traffic.
+
+This is strictly a host presentation feature: transcript files, command files, stream-3 memory tables, parser input, Quetzal state, and `zmachine_output_data()` remain free of IRC control bytes.
 
 ### Command replay, transcript, and recording streams
 
@@ -211,7 +234,7 @@ For a full-game request, a successful save makes the story's save opcode return 
 
 For a V5+ auxiliary request, `zmachine::save` writes exactly the requested story-memory bytes and stores `1` on success. `zmachine::restore` reads at most the requested byte count into dynamic memory and stores the number of bytes actually loaded; a missing auxiliary file stores `0`. Auxiliary files are not part of the saved state of play. Cancel stores the normal failure result `0` for an auxiliary request.
 
-Configure optional output wrapping. The value is a maximum UTF-8 byte count per returned physical line; `0` disables automatic wrapping and is the default:
+Configure optional output wrapping. The value is a maximum byte count per returned physical line; `0` disables automatic wrapping and is the default:
 
 ```tcl
 zmachine::configure game1 -wordwrap 400
@@ -225,22 +248,24 @@ zmachine::destroy game1
 
 ## IRC-oriented output wrapping
 
-Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, stream/file-request completion calls apply the configured session limit only while returning that text to Tcl.
+Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, and stream/file-request completion calls apply the configured session limit only while returning that text to Tcl.
 
 The wrapper:
 
-- measures limits in UTF-8 bytes rather than characters
+- measures limits in bytes rather than characters
 - prefers whitespace boundaries
 - preserves story-supplied newlines
 - does not split inside a UTF-8 code point
 - can hard-wrap a single long word when necessary
+- in mIRC mode, treats colour/style sequences as atomic formatting tokens and re-establishes active formatting on newly inserted lines
 - is disabled by default
 
-This lets an IRC bot choose a conservative payload size while leaving room for the IRC command, target, tags, prefix, and CRLF framing.
+This lets an IRC bot choose a conservative payload size while leaving room for the IRC command, target, tags, prefix, CRLF framing, and any mIRC formatting bytes.
 
 Example:
 
 ```tcl
+zmachine::configure game1 -format mirc
 zmachine::configure game1 -wordwrap 380
 
 foreach line [split [zmachine::command game1 "look"] "\n"] {
@@ -355,7 +380,7 @@ A game session remains resident as one native VM instance:
 IRC/Tcl -> one input line/key -> VM executes -> next input/file request -> Tcl
 ```
 
-IRC framing, flood control, user ownership, authentication, save/stream-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core.
+IRC framing, flood control, user ownership, authentication, save/stream-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core. The optional mIRC renderer is deliberately the last presentation transformation before Tcl receives output; canonical VM text and persistent game state never contain IRC controls.
 
 ## Licensing
 
