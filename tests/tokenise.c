@@ -7,9 +7,9 @@
  * The test exercises the public instruction path, the main story dictionary,
  * the optional user-dictionary operand, dictionary separators, parse-buffer
  * positions, the flag which preserves slots for unrecognized words, exact
- * dictionary encryption (including case, A2, truncation, and custom alphabets),
- * and the distinction between read's special parse=0 convention and tokenise's
- * required parse-table destination.
+ * dictionary encryption (including required lowercasing, A2, truncation, and
+ * custom alphabets), and the distinction between read's special parse=0
+ * convention and tokenise's required parse-table destination.
  */
 
 #include "tclzmachine.h"
@@ -44,9 +44,6 @@ int main(void)
 {
     static const uint8_t encoded_look[6] = {
         0x46U, 0x94U, 0x40U, 0xA5U, 0x94U, 0xA5U
-    };
-    static const uint8_t encoded_upper_look[6] = {
-        0x12U, 0x24U, 0x50U, 0x94U, 0x92U, 0x05U
     };
     static const uint8_t encoded_mystery[6] = {
         0x4BU, 0xD8U, 0x65U, 0x57U, 0xF8U, 0xA5U
@@ -142,9 +139,9 @@ int main(void)
     assert(memcmp(vm.memory + 0xA0U, encoded_look, 6U) == 0);
 
     /*
-     * encode_text acts on ZSCII already in story memory and must not inherit
-     * read's lower-case conversion. "LOOK" therefore uses an A1 shift before
-     * every upper-case letter instead of producing the lower-case "look" key.
+     * S 3.7 requires dictionary encryption to lowercase text. encode_text says
+     * to encode as if the source were a dictionary entry, so upper-case LOOK
+     * must intentionally produce the same key as lower-case look.
      */
     memcpy(vm.memory + 0x160U, "LOOK", 4U);
     memset(vm.memory + 0xC8U, 0, 6U);
@@ -158,14 +155,14 @@ int main(void)
     vm.memory[0xF6U] = 0xC8U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0xF7U);
-    assert(memcmp(vm.memory + 0xC8U, encoded_upper_look, 6U) == 0);
+    assert(memcmp(vm.memory + 0xC8U, encoded_look, 6U) == 0);
 
     /*
-     * tokenise is likewise case-preserving. A user dictionary containing only
-     * upper-case "LOOK" must match an upper-case text buffer; lowercasing here
-     * would instead search for the main dictionary's different binary key.
+     * tokenise performs the same dictionary encryption. An upper-case text
+     * buffer therefore matches the normal lower-case dictionary key even when
+     * the text did not arrive through read's already-lowercased input buffer.
      */
-    write_dictionary(&vm, 0x140U, encoded_upper_look);
+    write_dictionary(&vm, 0x140U, encoded_look);
     vm.memory[0x60U] = 10U;
     vm.memory[0x61U] = 4U;
     memcpy(vm.memory + 0x62U, "LOOK", 4U);
@@ -216,9 +213,9 @@ int main(void)
     assert(memcmp(vm.memory + 0xB8U, encoded_partial_escape, 6U) == 0);
 
     /*
-     * Install a V5 custom alphabet table whose A1 Z-character 6 is '@'. Since
-     * encode_text preserves the story-memory byte exactly, the encoded key
-     * begins with shift-A1 (4), then Z-character 6.
+     * Install a V5 custom alphabet table whose A1 Z-character 6 is '@'. The
+     * character is unchanged by lowercasing, so custom-alphabet lookup still
+     * finds A1 and emits shift-A1 (4), then Z-character 6.
      */
     vm.memory[0x34U] = 0x01U;
     vm.memory[0x35U] = 0x80U;
