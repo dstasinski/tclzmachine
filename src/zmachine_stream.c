@@ -587,7 +587,16 @@ static int pending_read_char_value(const ZMachine *vm, uint16_t *zscii)
     return 1;
 }
 
-/* Intercept external stream-selection opcodes and observe completed read_char. */
+/*
+ * Intercept stream-selection opcodes and observe completed read_char.
+ *
+ * This layer owns all VAR:19 output_stream values, not only the host-file
+ * streams 2 and 4. The first operand may itself be variable 0, whose evaluation
+ * pops the stack; resolving it merely to decide whether to delegate and then
+ * asking the old presentation handler to resolve it again would pop twice.
+ * Keeping all output-stream selection here guarantees each operand is evaluated
+ * exactly once while preserving the existing stream-1 and nested stream-3 rules.
+ */
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -636,32 +645,32 @@ int zmachine_step(ZMachine *vm)
                                  instruction.next_pc);
         }
 
-        /* output_stream: own only host-file streams 2 and 4. */
+        /* output_stream stream [table] */
         {
             int16_t stream = (int16_t)values[0];
-            ZMachineStreamIO *io;
 
-            if (stream != 2 && stream != -2 && stream != 4 && stream != -4)
-                return zmachine_step_stream_base(vm);
-            io = ensure_stream_io(vm);
-            if (!io)
-                return stream_vm_error(vm, "out of memory while selecting output stream");
-
-            if (stream == -2) {
-                select_stream2(vm, 0);
-                if (io->transcript)
-                    fflush(io->transcript);
+            if (stream == 0) {
                 vm->pc = instruction.next_pc;
                 return TCL_OK;
             }
-            if (stream == -4) {
-                io->record_selected = 0;
-                if (io->record)
-                    fflush(io->record);
+
+            if (stream == 1 || stream == -1) {
+                vm->output_stream1_enabled = stream > 0;
                 vm->pc = instruction.next_pc;
                 return TCL_OK;
             }
-            if (stream == 2) {
+
+            if (stream == 2 || stream == -2) {
+                ZMachineStreamIO *io = ensure_stream_io(vm);
+                if (!io)
+                    return stream_vm_error(vm, "out of memory while selecting transcript stream");
+                if (stream < 0) {
+                    select_stream2(vm, 0);
+                    if (io->transcript)
+                        fflush(io->transcript);
+                    vm->pc = instruction.next_pc;
+                    return TCL_OK;
+                }
                 if (io->transcript) {
                     select_stream2(vm, 1);
                     vm->pc = instruction.next_pc;
@@ -670,13 +679,54 @@ int zmachine_step(ZMachine *vm)
                 return begin_request(vm, STREAM_REQUEST_TRANSCRIPT,
                                      instruction.next_pc);
             }
-            if (io->record) {
-                io->record_selected = 1;
+
+            if (stream == 3) {
+                uint16_t table;
+
+                if (instruction.operand_count_actual < 2U)
+                    return stream_vm_error(vm, "output_stream 3 is missing its table operand");
+                if (vm->stream3_depth >= ZM_MAX_STREAM3_DEPTH)
+                    return stream_vm_error(vm, "output_stream 3 nesting limit exceeded");
+                table = values[1];
+                if ((size_t)table + 1U >= vm->memory_size ||
+                    (size_t)table + 1U >= (size_t)vm->static_memory_addr)
+                    return stream_vm_error(vm, "output_stream 3 table is outside dynamic memory");
+                vm->memory[table] = 0U;
+                vm->memory[table + 1U] = 0U;
+                vm->stream3_tables[vm->stream3_depth++] = table;
                 vm->pc = instruction.next_pc;
                 return TCL_OK;
             }
-            return begin_request(vm, STREAM_REQUEST_RECORD,
-                                 instruction.next_pc);
+
+            if (stream == -3) {
+                if (vm->stream3_depth == 0U)
+                    return stream_vm_error(vm, "output_stream -3 without active stream 3");
+                --vm->stream3_depth;
+                vm->pc = instruction.next_pc;
+                return TCL_OK;
+            }
+
+            if (stream == 4 || stream == -4) {
+                ZMachineStreamIO *io = ensure_stream_io(vm);
+                if (!io)
+                    return stream_vm_error(vm, "out of memory while selecting command stream");
+                if (stream < 0) {
+                    io->record_selected = 0;
+                    if (io->record)
+                        fflush(io->record);
+                    vm->pc = instruction.next_pc;
+                    return TCL_OK;
+                }
+                if (io->record) {
+                    io->record_selected = 1;
+                    vm->pc = instruction.next_pc;
+                    return TCL_OK;
+                }
+                return begin_request(vm, STREAM_REQUEST_RECORD,
+                                     instruction.next_pc);
+            }
+
+            return stream_vm_error(vm, "unsupported Z-machine output stream number");
         }
     }
 
