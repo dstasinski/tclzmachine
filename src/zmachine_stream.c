@@ -187,6 +187,33 @@ static int begin_request(ZMachine *vm, StreamRequestKind kind,
     return TCL_OK;
 }
 
+/*
+ * Honor direct game writes to Flags 2 bit 0 before transcript text can escape.
+ *
+ * V1/V2 can select stream 2 only through Flags 2, and later versions may use
+ * either Flags 2 or output_stream 2. If a story raises the bit without an
+ * already chosen transcript file, suspend cooperatively at the current PC so
+ * Tcl can supply host filesystem policy. Once a file has been chosen it remains
+ * associated with the session, so repeated off/on toggles never reprompt.
+ */
+static int request_transcript_if_needed(ZMachine *vm)
+{
+    ZMachineStreamIO *io;
+
+    if (!vm || !stream2_selected(vm) ||
+        vm->state == ZM_STATE_HALTED || vm->state == ZM_STATE_ERROR)
+        return TCL_OK;
+
+    io = ensure_stream_io(vm);
+    if (!io)
+        return stream_vm_error(vm,
+                               "out of memory while selecting transcript stream");
+    if (io->transcript || io->pending_request != STREAM_REQUEST_NONE)
+        return TCL_OK;
+
+    return begin_request(vm, STREAM_REQUEST_TRANSCRIPT, vm->pc);
+}
+
 const char *zmachine_pending_stream_request(const ZMachine *vm)
 {
     return (vm && vm->stream_io) ?
@@ -201,6 +228,33 @@ int zmachine_current_input_stream(const ZMachine *vm)
 int zmachine_command_recording_selected(const ZMachine *vm)
 {
     return vm && vm->stream_io && vm->stream_io->record_selected;
+}
+
+/*
+ * Reset interpreter-only stream selections after the restart opcode.
+ *
+ * Restart restores VM state rather than host resources. The Standard preserves
+ * only Flags 2 bits 0 and 1, so stream-1 command replay and output stream 4 must
+ * return to their default unselected state. Open host files stay associated with
+ * the session: a later story selection can resume them without asking Tcl for a
+ * second path, matching the Standard's one-transcript-file-per-session guidance.
+ * Transcript selection itself is represented by the preserved Flags 2 bit and
+ * is therefore deliberately left untouched here.
+ */
+void zmachine_stream_after_restart(ZMachine *vm)
+{
+    ZMachineStreamIO *io;
+
+    if (!vm || !vm->stream_io)
+        return;
+
+    io = vm->stream_io;
+    io->input_stream = 0U;
+    io->record_selected = 0;
+    io->pending_request = STREAM_REQUEST_NONE;
+    io->pending_next_pc = 0U;
+    if (io->record)
+        fflush(io->record);
 }
 
 /* Open/configure one host stream and, when applicable, resume its opcode. */
@@ -306,9 +360,21 @@ static int write_decimal_marker(ZMachine *vm, FILE *fp, uint16_t value)
                           "unable to write command recording file");
 }
 
-/* Record one completed read command and echo it to transcript stream 2. */
+/*
+ * Record one completed command and perform the read-input echo side effects.
+ *
+ * `echo` contains only newly accepted host input, preserving its display case.
+ * V5+ preloaded text is intentionally absent because the Standard says the game,
+ * not the interpreter, redisplays that prefix. Stream 4 is different: it records
+ * the completed logical command, so it uses the final lower-cased story buffer.
+ * A non-Enter terminating key finishes aread without synthesizing a carriage
+ * return on streams 1/2. Stream 3 suppresses those screen/transcript echoes but
+ * does not suppress command recording, which records input rather than story
+ * output.
+ */
 static int note_line_input(ZMachine *vm, uint16_t text_buffer,
-                           uint16_t terminator)
+                           uint16_t terminator,
+                           const char *echo, size_t echo_length)
 {
     ZMachineStreamIO *io = vm ? vm->stream_io : NULL;
     const uint8_t *text;
@@ -333,18 +399,19 @@ static int note_line_input(ZMachine *vm, uint16_t text_buffer,
         return TCL_ERROR;
     text = vm->memory + start;
 
-    /*
-     * IRC itself already displays the player's command, so stream 1 echo is a
-     * host-presentation responsibility rather than being duplicated in the Tcl
-     * response. Stream 2 still receives the standard transcript echo.
-     */
-    if (io && io->transcript && stream2_selected(vm) && vm->stream3_depth == 0U) {
+    if (vm->stream3_depth == 0U) {
         static const char newline = '\n';
-        if (write_external(vm, io->transcript, text, length,
-                           "unable to write transcript file") != TCL_OK ||
-            write_external(vm, io->transcript, &newline, 1U,
-                           "unable to write transcript file") != TCL_OK)
-            return TCL_ERROR;
+
+        if (echo && echo_length > 0U) {
+            zmachine_output_append(vm, echo, echo_length);
+            if (vm->state == ZM_STATE_ERROR)
+                return TCL_ERROR;
+        }
+        if (terminator == 13U) {
+            zmachine_output_append(vm, &newline, 1U);
+            if (vm->state == ZM_STATE_ERROR)
+                return TCL_ERROR;
+        }
     }
 
     if (io && io->record && io->record_selected) {
@@ -504,9 +571,28 @@ static int prepare_replay_input(ZMachine *vm)
         }
     }
 
-    if (zmachine_supply_input(vm, line) != TCL_OK)
-        return REPLAY_PREPARE_ERROR;
-    vm->pending_input_terminator = has_marker ? marker : 13U;
+    /*
+     * A replayed non-Enter line terminator must obey the same V5+ terminating
+     * character table as a key supplied directly by Tcl. Reuse the existing
+     * numeric-key API for that validation, then replace its intentionally empty
+     * line with the command-file text while retaining the validated terminator.
+     * This keeps replay on the ordinary read/preload/tokenization path without
+     * duplicating header-table semantics in the command-file reader.
+     */
+    if (has_marker && marker != 13U) {
+        if (zmachine_supply_key(vm, marker) != TCL_OK) {
+            stream_vm_error(vm,
+                            "command replay line terminator is not accepted by the story");
+            return REPLAY_PREPARE_ERROR;
+        }
+        Tcl_DStringSetLength(&vm->pending_input, 0);
+        Tcl_DStringAppend(&vm->pending_input, line, -1);
+        vm->input_available = 1;
+    } else {
+        if (zmachine_supply_input(vm, line) != TCL_OK)
+            return REPLAY_PREPARE_ERROR;
+        vm->pending_input_terminator = 13U;
+    }
     return REPLAY_PREPARE_QUEUED;
 }
 
@@ -515,17 +601,27 @@ static int prepare_replay_input(ZMachine *vm)
  * yields for keyboard input, another host request, or termination. Output from
  * multiple replay turns is accumulated so a single Tcl call does not lose text
  * merely because the lower cooperative loop clears its per-run output buffer.
+ * Direct Flags-2 transcript requests are converted into the same cooperative
+ * host-file request before any subsequent story output can be executed.
  */
 int zmachine_run(ZMachine *vm)
 {
     Tcl_DString accumulated;
-    int rc;
+    int rc = TCL_OK;
     int replayed = 0;
 
     Tcl_DStringInit(&accumulated);
     for (;;) {
+        rc = request_transcript_if_needed(vm);
+        if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
+            break;
+
         rc = zmachine_run_stream_base(vm);
         if (rc != TCL_OK)
+            break;
+
+        rc = request_transcript_if_needed(vm);
+        if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
             break;
 
         if (vm->state == ZM_STATE_WAITING_INPUT &&
@@ -574,21 +670,64 @@ void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
     zmachine_output_append_stream_base(vm, text, len);
 }
 
-/* Add transcript/stream-4 side effects after the mature input writer succeeds. */
+/*
+ * Add stream echo/recording side effects after the mature input writer succeeds.
+ *
+ * Keep a private copy of the newly supplied host bytes because the lower input
+ * engine consumes them and lowercases the story buffer. For V5+ preloaded input,
+ * only the newly accepted suffix is echoed; the existing prefix is left for the
+ * story to redisplay. Stream 4 still records the completed final buffer.
+ */
 int zmachine_input_read_line(ZMachine *vm,
                              uint16_t text_buffer,
                              uint16_t parse_buffer,
                              uint16_t *terminator)
 {
+    Tcl_DString supplied;
+    size_t prefix_length = 0U;
+    size_t final_length = 0U;
+    size_t echo_length = 0U;
     uint16_t local_terminator = 13U;
     int rc;
 
+    Tcl_DStringInit(&supplied);
+    if (vm && vm->input_available) {
+        Tcl_DStringAppend(&supplied,
+                          Tcl_DStringValue(&vm->pending_input),
+                          Tcl_DStringLength(&vm->pending_input));
+        if (vm->version >= 5U && vm->memory &&
+            (size_t)text_buffer + 1U < vm->memory_size)
+            prefix_length = vm->memory[(size_t)text_buffer + 1U];
+    }
+
     rc = zmachine_input_read_line_stream_base(vm, text_buffer, parse_buffer,
                                               &local_terminator);
-    if (rc != TCL_OK)
+    if (rc != TCL_OK) {
+        Tcl_DStringFree(&supplied);
         return rc;
-    if (note_line_input(vm, text_buffer, local_terminator) != TCL_OK)
+    }
+
+    if (vm->version <= 4U) {
+        size_t start = (size_t)text_buffer + 1U;
+        while (start + final_length < vm->memory_size &&
+               vm->memory[start + final_length] != 0U)
+            ++final_length;
+    } else if ((size_t)text_buffer + 1U < vm->memory_size) {
+        final_length = vm->memory[(size_t)text_buffer + 1U];
+    }
+
+    if (final_length > prefix_length)
+        echo_length = final_length - prefix_length;
+    if (echo_length > (size_t)Tcl_DStringLength(&supplied))
+        echo_length = (size_t)Tcl_DStringLength(&supplied);
+
+    if (note_line_input(vm, text_buffer, local_terminator,
+                        Tcl_DStringValue(&supplied), echo_length) != TCL_OK) {
+        Tcl_DStringFree(&supplied);
         return TCL_ERROR;
+    }
+    Tcl_DStringFree(&supplied);
+
     if (terminator)
         *terminator = local_terminator;
     return TCL_OK;
@@ -625,6 +764,10 @@ static int pending_read_char_value(const ZMachine *vm, uint16_t *zscii)
  * asking the old presentation handler to resolve it again would pop twice.
  * Keeping all output-stream selection here guarantees each operand is evaluated
  * exactly once while preserving the existing stream-1 and nested stream-3 rules.
+ *
+ * A direct write to Flags 2 bit 0 is detected both before and after delegated
+ * instructions. The post-check catches storeb/storew/copy_table selection; the
+ * pre-check covers initial/restored/restarted header state before text prints.
  */
 int zmachine_step(ZMachine *vm)
 {
@@ -638,6 +781,11 @@ int zmachine_step(ZMachine *vm)
 
     if (!vm || !vm->memory)
         return stream_vm_error(vm, "cannot execute without a loaded story");
+
+    rc = request_transcript_if_needed(vm);
+    if (rc != TCL_OK || vm->state == ZM_STATE_WAITING_STREAM_FILE)
+        return rc;
+
     if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
                                      vm->pc, &instruction,
                                      decode_error, sizeof(decode_error)))
@@ -768,6 +916,9 @@ int zmachine_step(ZMachine *vm)
     rc = zmachine_step_stream_base(vm);
     if (rc == TCL_OK && was_read_char && vm->pc != old_pc &&
         note_key_input(vm, read_char_value) != TCL_OK)
+        return TCL_ERROR;
+    if (rc == TCL_OK && vm->state == ZM_STATE_READY &&
+        request_transcript_if_needed(vm) != TCL_OK)
         return TCL_ERROR;
     return rc;
 }

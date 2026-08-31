@@ -21,6 +21,7 @@
 #include "zmachine_decode.h"
 #include "zmachine_exec.h"
 #include "zmachine_input.h"
+#include "zmachine_stream.h"
 #include "zmachine_undo.h"
 
 #include <stdint.h>
@@ -245,7 +246,9 @@ static int handle_read(ZMachine *vm,
  * pristine story image, after which zmachine_refresh_interpreter_header()
  * reapplies the interpreter-owned capability/Rst fields. Preserving the whole
  * live word here would incorrectly carry transient redraw and game-request bits
- * across a restart.
+ * across a restart. Host stream files are not VM state: the stream layer then
+ * resets replay input and command recording selections while retaining any
+ * already-chosen files for later reuse in the same interpreter session.
  */
 static int execute_restart(ZMachine *vm)
 {
@@ -281,6 +284,7 @@ static int execute_restart(ZMachine *vm)
     memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
     Tcl_DStringSetLength(&vm->pending_input, 0);
     zmachine_refresh_interpreter_header(vm);
+    zmachine_stream_after_restart(vm);
     return TCL_OK;
 }
 
