@@ -52,6 +52,85 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
     return TCL_OK;
 }
 
+/* Write a big-endian word only within mutable dynamic story memory. */
+static int write_dynamic_word(ZMachine *vm, uint32_t address, uint16_t value)
+{
+    if (!vm || !vm->memory ||
+        (size_t)address + 1U >= vm->memory_size ||
+        (size_t)address + 1U >= (size_t)vm->static_memory_addr)
+        return dispatch_error(vm, "presentation opcode writes outside dynamic memory");
+
+    vm->memory[address] = (uint8_t)(value >> 8);
+    vm->memory[address + 1U] = (uint8_t)value;
+    return TCL_OK;
+}
+
+/*
+ * Handle V5+ EXT opcodes whose observable effect is textual/presentation-only.
+ *
+ * The IRC frontend exposes no selectable fonts or colours, but stories can use
+ * the result of set_font and check_unicode for control flow. Font 1 (normal) is
+ * therefore the only advertised font: selecting/querying it returns previous
+ * font 1, while other font IDs return 0. Unicode output is genuine UTF-8 and
+ * check_unicode reports exactly the capabilities of that text path. True-colour
+ * selection is consumed after evaluating operands because it has no textual
+ * effect in this frontend.
+ */
+static int handle_extended_text_presentation(
+    ZMachine *vm,
+    const ZMachineInstruction *instruction,
+    int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 5U ||
+        instruction->form != ZM_FORM_EXTENDED)
+        return TCL_OK;
+
+    if (instruction->opcode_number != 4U &&
+        instruction->opcode_number != 11U &&
+        instruction->opcode_number != 12U &&
+        instruction->opcode_number != 13U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (instruction->opcode_number == 13U) {
+        if (instruction->operand_count_actual < 2U)
+            return dispatch_error(vm, "set_true_colour requires two operands");
+    } else if (instruction->operand_count_actual < 1U) {
+        return dispatch_error(vm, "extended presentation opcode is missing its operand");
+    }
+
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    switch (instruction->opcode_number) {
+    case 4U: { /* set_font font -> result */
+        uint16_t result = (values[0] == 0U || values[0] == 1U) ? 1U : 0U;
+        return store_value(vm, instruction->next_pc, result);
+    }
+
+    case 11U: /* print_unicode char-number */
+        if (zmachine_text_output_unicode(vm, values[0]) != TCL_OK)
+            return TCL_ERROR;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+
+    case 12U: /* check_unicode char-number -> result */
+        return store_value(vm, instruction->next_pc,
+                           zmachine_text_unicode_capabilities(values[0]));
+
+    case 13U: /* set_true_colour foreground background */
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+
+    default:
+        return TCL_OK;
+    }
+}
+
 /*
  * Handle the in-memory undo opcodes from the EXT table.
  *
@@ -203,6 +282,94 @@ static int handle_null_get_child(ZMachine *vm,
     return store_zero_and_branch_false(vm, instruction->next_pc);
 }
 
+/*
+ * Handle window operations which retain observable text-only state.
+ *
+ * Versions 3-5, 7 and 8 have lower window 0 and upper window 1. This runtime
+ * retains only which window is selected; all nonzero-window text is discarded
+ * at the canonical output boundary so status/layout output cannot leak into an
+ * IRC reply. erase_line has no textual state to mutate. get_cursor must still
+ * write an array, so the virtual text-only screen reports deterministic row 1,
+ * column 1 while enforcing dynamic-memory bounds.
+ */
+static int handle_window_opcode(ZMachine *vm,
+                                const ZMachineInstruction *instruction,
+                                int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 3U ||
+        instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return TCL_OK;
+
+    if (instruction->opcode_number != 11U &&
+        instruction->opcode_number != 14U &&
+        instruction->opcode_number != 16U)
+        return TCL_OK;
+
+    if (instruction->opcode_number != 11U && vm->version < 4U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (instruction->operand_count_actual < 1U)
+        return dispatch_error(vm, "window opcode is missing its operand");
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    switch (instruction->opcode_number) {
+    case 11U: /* set_window window */
+        if (values[0] > 1U)
+            return dispatch_error(vm, "unsupported Z-machine window number");
+        vm->current_window = (uint8_t)values[0];
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+
+    case 14U: /* erase_line value -- presentation-only outside V6. */
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+
+    case 16U: { /* get_cursor array */
+        uint32_t array = values[0];
+        if (write_dynamic_word(vm, array, 1U) != TCL_OK ||
+            write_dynamic_word(vm, array + 2U, 1U) != TCL_OK)
+            return TCL_ERROR;
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    default:
+        return TCL_OK;
+    }
+}
+
+/* Handle V5+ 2OP:27 set_colour as a text-only presentation no-op. */
+static int handle_set_colour(ZMachine *vm,
+                             const ZMachineInstruction *instruction,
+                             int *handled)
+{
+    uint16_t values[ZM_MAX_OPERANDS];
+
+    *handled = 0;
+    if (!vm || !instruction || vm->version < 5U ||
+        instruction->operand_count != ZM_OPERANDS_2OP ||
+        instruction->opcode_number != 27U)
+        return TCL_OK;
+
+    *handled = 1;
+    if (instruction->operand_count_actual < 2U)
+        return dispatch_error(vm, "set_colour requires two operands");
+    if (zmachine_resolve_operands(vm, instruction, values,
+                                  ZM_MAX_OPERANDS) != TCL_OK)
+        return TCL_ERROR;
+
+    (void)values;
+    vm->pc = instruction->next_pc;
+    return TCL_OK;
+}
+
 /* Return nonzero for presentation opcodes which can safely disappear. */
 static int is_text_only_noop(const ZMachine *vm,
                              const ZMachineInstruction *instruction)
@@ -212,8 +379,7 @@ static int is_text_only_noop(const ZMachine *vm,
         instruction->operand_count != ZM_OPERANDS_VAR)
         return 0;
 
-    if (instruction->opcode_number == 10U ||
-        instruction->opcode_number == 11U)
+    if (instruction->opcode_number == 10U)
         return vm->version >= 3U;
 
     if (vm->version < 4U)
@@ -260,7 +426,20 @@ static int handle_output_stream(ZMachine *vm,
         return TCL_OK;
     }
 
-    if (stream == 2 || stream == -2 || stream == 4 || stream == -4) {
+    if (stream == 2 || stream == -2) {
+        if (stream > 0)
+            vm->flags2 |= 0x0001U;
+        else
+            vm->flags2 &= (uint16_t)~0x0001U;
+        if (vm->memory_size > 0x11U) {
+            vm->memory[0x10U] = (uint8_t)(vm->flags2 >> 8);
+            vm->memory[0x11U] = (uint8_t)vm->flags2;
+        }
+        vm->pc = instruction->next_pc;
+        return TCL_OK;
+    }
+
+    if (stream == 4 || stream == -4) {
         vm->pc = instruction->next_pc;
         return TCL_OK;
     }
@@ -431,12 +610,27 @@ int zmachine_step(ZMachine *vm)
                               "unable to decode Z-machine instruction");
     }
 
+    if (handle_extended_text_presentation(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
+
     if (handle_extended_undo(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
     if (handled)
         return TCL_OK;
 
     if (handle_null_get_child(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
+
+    if (handle_window_opcode(vm, &instruction, &handled) != TCL_OK)
+        return TCL_ERROR;
+    if (handled)
+        return TCL_OK;
+
+    if (handle_set_colour(vm, &instruction, &handled) != TCL_OK)
         return TCL_ERROR;
     if (handled)
         return TCL_OK;
