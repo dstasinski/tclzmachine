@@ -217,16 +217,22 @@ int main(void)
 
     free_vm(&vm);
 
-    /* A malformed get_cursor destination must be rejected at dynamic memory. */
+    /*
+     * A malformed get_cursor destination must be rejected before either word
+     * is written. This catches partial mutation at the dynamic/static boundary.
+     */
     init_vm(&vm);
     vm.pc = 0x20U;
     vm.memory[0x20U] = 0xF0U;
     vm.memory[0x21U] = 0x3FU;
     vm.memory[0x22U] = 0x02U;
     vm.memory[0x23U] = 0xFEU;
+    vm.memory[0x2FEU] = 0xAAU;
+    vm.memory[0x2FFU] = 0xBBU;
     assert(zmachine_step(&vm) == TCL_ERROR);
     assert(vm.state == ZM_STATE_ERROR);
     assert(strstr(vm.error, "dynamic memory") != NULL);
+    assert(vm.memory[0x2FEU] == 0xAAU && vm.memory[0x2FFU] == 0xBBU);
     free_vm(&vm);
 
     puts("extended presentation opcode tests passed");
