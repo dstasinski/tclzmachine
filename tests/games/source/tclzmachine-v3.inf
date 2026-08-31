@@ -5,14 +5,15 @@
 !
 ! Compact, repository-owned Version 3 integration fixture for tclzmachine.
 ! It intentionally does not include the modern Inform standard library, which
-! requires V5+ features.  Instead it uses ordinary Inform control flow and a
+! requires V5+ features. Instead it uses ordinary Inform control flow and a
 ! small set of direct Z-machine opcodes so the fixture exercises the actual V3
 ! VM model without depending on copyrighted or external story files.
 !
 ! The first character of each input line is enough to select most commands;
-! "save" and "south" are distinguished by the second character.  The script
+! "save" and "south" are distinguished by the second character. The script
 ! tests line input, calls, globals, V3 object-tree layout, insert_obj, branches,
-! canonical text output, and persistent state across Tcl calls.
+! Quetzal save/restore branch semantics, canonical text output, and persistent
+! state across Tcl calls.
 
 Array InputBuffer -> 34;
 Global RoomState = 0;
@@ -36,6 +37,32 @@ Object Player "player";
         print "You are carrying the brass lamp.^";
     else
         print "You are carrying nothing.^";
+];
+
+! V1-V3 save is a branch opcode. A successful restore resumes at this saved
+! branch record and takes the successful branch again, restoring this routine's
+! frame as part of the state of play.
+[ DoSave;
+    @save ?SaveSucceeded;
+    print "Save failed.^";
+    rfalse;
+
+.SaveSucceeded;
+    print "Save completed.^";
+    rtrue;
+];
+
+! On a successful V3 restore control never reaches RestoreSucceeded: execution
+! resumes at the old save opcode instead. The branch exists only because the
+! opcode encoding requires one; a failed restore falls through normally.
+[ DoRestore;
+    @restore ?RestoreSucceeded;
+    print "Restore failed.^";
+    rfalse;
+
+.RestoreSucceeded;
+    print "Unexpected restore branch.^";
+    rfalse;
 ];
 
 [ Main c c2 p first_child;
@@ -82,13 +109,21 @@ Object Player "player";
         } else if (c == 'n') {
             RoomState = 1;
             ShowLocation();
-        } else if (c == 's' && c2 == 'o') {
-            RoomState = 0;
-            ShowLocation();
+        } else if (c == 's') {
+            if (c2 == 'a') {
+                DoSave();
+            } else if (c2 == 'o') {
+                RoomState = 0;
+                ShowLocation();
+            } else {
+                print "Use SAVE or SOUTH.^";
+            }
+        } else if (c == 'r') {
+            DoRestore();
         } else if (c == 'q') {
             @quit;
         } else {
-            print "Try LOOK, TAKE, DROP, INVENTORY, NORTH, SOUTH, or QUIT.^";
+            print "Try LOOK, TAKE, DROP, INVENTORY, NORTH, SOUTH, SAVE, RESTORE, or QUIT.^";
         }
     }
 ];
