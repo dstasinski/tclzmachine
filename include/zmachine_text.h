@@ -55,6 +55,26 @@ int zmachine_text_print_object_name(ZMachine *vm, uint16_t object);
  */
 int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii);
 
+/*
+ * Emit one BMP Unicode character for EXT:11 print_unicode.
+ *
+ * Printable Unicode scalar values are encoded as UTF-8 for stream 1. When
+ * stream 3 is active the character is converted back to the story's selected
+ * ZSCII mapping when possible, otherwise '?' is stored as required by the
+ * output-stream rules. Control values and UTF-16 surrogate code units are
+ * rejected as invalid Z-machine Unicode output.
+ */
+int zmachine_text_output_unicode(ZMachine *vm, uint16_t codepoint);
+
+/*
+ * Return the EXT:12 check_unicode capability bits for one BMP code point.
+ * Bit 0 means this UTF-8 Tcl frontend can print the character. Bit 1 is set
+ * only for printable ASCII because the current cooperative input path stores
+ * Tcl input as ZSCII bytes rather than decoding arbitrary Unicode keyboard
+ * characters. Bits 2..15 are always zero.
+ */
+uint16_t zmachine_text_unicode_capabilities(uint16_t codepoint);
+
 #ifdef __cplusplus
 }
 #endif
