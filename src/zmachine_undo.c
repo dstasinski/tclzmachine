@@ -7,7 +7,12 @@
  * evaluation-stack contents, routine frames, and the continuation of the
  * save_undo instruction. Interpreter presentation state, host input buffers,
  * output streams, and PRNG state are intentionally not captured because the
- * Z-machine standard explicitly excludes them from saved game state.
+ * Z-machine standard excludes them from saved-game state.
+ *
+ * Storage is allocated lazily so an IRC bot may keep many resident sessions
+ * without paying a fixed second dynamic-memory/stack allocation for stories
+ * that never request undo. Only one snapshot is retained; a successful later
+ * save replaces the previous point atomically after all allocations succeed.
  */
 
 #include "tclzmachine.h"
@@ -19,15 +24,23 @@
 
 /* Heap-owned snapshot; allocated only after a story actually requests undo. */
 struct ZMachineUndoState {
+    /* Exact dynamic-memory image from address 0 through static-memory start. */
     uint8_t *dynamic_memory;
     size_t dynamic_memory_size;
 
+    /* Evaluation-stack words and the saved stack pointer. */
     uint16_t *stack;
     size_t sp;
 
+    /* Active routine frames, including their locals and stack-base metadata. */
     ZMachineFrame *frames;
     size_t frame_count;
 
+    /*
+     * Continuation of the original save_undo store record. On restoration the
+     * pre-store snapshot is reinstated, result 2 is written to store_variable,
+     * and execution resumes at resume_pc.
+     */
     uint32_t resume_pc;
     uint8_t store_variable;
 };
@@ -53,6 +66,11 @@ static void free_snapshot(ZMachineUndoState *snapshot)
     free(snapshot);
 }
 
+/*
+ * Discard the session's current undo point, if any.
+ * Story load/restart/full restore and session destruction call this so a
+ * snapshot can never be applied to a different state lineage or story image.
+ */
 void zmachine_undo_discard(ZMachine *vm)
 {
     if (!vm)
@@ -61,6 +79,20 @@ void zmachine_undo_discard(ZMachine *vm)
     vm->undo_state = NULL;
 }
 
+/*
+ * Create or replace the one-level undo snapshot.
+ *
+ * `resume_pc` is the byte after save_undo's store-variable record and
+ * `store_variable` is that original destination. The snapshot itself is taken
+ * before the immediate success value 1 is stored, which is essential when the
+ * destination is variable 0: a later restore must recreate the pre-store stack
+ * and then push only the restored value 2.
+ *
+ * Allocation or structurally unavailable state returns ZM_UNDO_UNAVAILABLE,
+ * allowing EXT:9 to report the standards-defined -1 capability result without
+ * putting the VM into an error state. The old snapshot remains valid until the
+ * replacement has been completely built.
+ */
 int zmachine_undo_save(ZMachine *vm,
                        uint32_t resume_pc,
                        uint8_t store_variable)
@@ -119,6 +151,19 @@ int zmachine_undo_save(ZMachine *vm,
     return ZM_UNDO_SUCCESS;
 }
 
+/*
+ * Restore the cached one-level undo point.
+ *
+ * Before mutating live state, validate every snapshot dimension against the
+ * currently loaded VM. Dynamic memory, stack words, and frames are then copied
+ * back. Header Flags 2 is preserved from the live interpreter because it is
+ * interpreter/session state rather than saved state. Other explicitly excluded
+ * presentation/output/PRNG state is left untouched simply by not snapshotting it.
+ *
+ * A successful restore writes 2 to the original save_undo destination and
+ * resumes at its saved continuation. The snapshot remains available, allowing
+ * a story to restore the same one-level point again until another save/discard.
+ */
 int zmachine_undo_restore(ZMachine *vm)
 {
     ZMachineUndoState *snapshot;
