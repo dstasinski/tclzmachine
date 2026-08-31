@@ -1,10 +1,9 @@
 # smoke.tcl
 #
 # Tcl-facing package smoke test. Besides verifying that the shared library
-# loads, this script creates a tiny synthetic V3 session and exercises the
-# presentation configuration API used by IRC callers. No real game fixture is
-# needed here; the synthetic file only has to contain a valid 64-byte header and
-# enough memory for the initial program counter.
+# loads, this script creates tiny synthetic V3/V5 sessions and exercises the
+# presentation configuration plus cooperative line/key input metadata used by
+# embedding applications. No external game fixture is needed here.
 
 if {$argc != 1} {
     error "usage: smoke.tcl /path/to/tclzmachine.so"
@@ -18,8 +17,8 @@ if {[package present tclzmachine] ne "0.2.0"} {
 }
 
 # `zmachine::key` is the explicit numeric ZSCII companion to line-oriented
-# `zmachine::command`. Behavioral read_char coverage lives in the C suite; this
-# smoke assertion catches an extension build which forgot to register the Tcl API.
+# `zmachine::command`. Behavioral read_char coverage also lives in the C suite;
+# this assertion catches an extension build which forgot to register the Tcl API.
 if {[namespace which ::zmachine::key] eq ""} {
     error "zmachine::key command was not registered"
 }
@@ -75,4 +74,59 @@ try {
     file delete -force $story_path
 }
 
-puts "tclzmachine package and Tcl configuration API loaded successfully"
+#
+# Build a synthetic V5 loop:
+#
+#   $40: read      $80 -> g16
+#   $45: read_char 1   -> g17
+#   $49: jump      $40
+#
+# A normal command satisfies the first line read and leaves the VM suspended on
+# read_char. Supplying an exact key then loops back to a line read with no input
+# queued. This exercises both inputRequest values through the real Tcl API.
+#
+set input_story [string repeat "\x00" 256]
+set input_story [string replace $input_story 0 0 "\x05"]
+set input_story [string replace $input_story 4 5 "\x00\xC0"] ;# high memory
+set input_story [string replace $input_story 6 7 "\x00\x40"] ;# initial PC
+set input_story [string replace $input_story 8 9 "\x00\xA0"] ;# dictionary
+set input_story [string replace $input_story 10 11 "\x00\xA0"] ;# object table
+set input_story [string replace $input_story 12 13 "\x00\x90"] ;# globals
+set input_story [string replace $input_story 14 15 "\x00\xC0"] ;# static memory
+set input_story [string replace $input_story 64 75 \
+    "\xE4\x3F\x00\x80\x10\xF6\x7F\x01\x11\x8C\xFF\xF6"]
+set input_story [string replace $input_story 128 128 "\x14"] ;# text max 20
+
+set input_channel [file tempfile input_story_path]
+fconfigure $input_channel -translation binary -encoding binary
+puts -nonewline $input_channel $input_story
+close $input_channel
+
+try {
+    if {[zmachine::create inputmeta $input_story_path] ne "inputmeta"} {
+        error "unable to create input-metadata session"
+    }
+
+    if {[dict get [zmachine::info inputmeta] inputRequest] ne ""} {
+        error "a ready session must not advertise a pending input request"
+    }
+
+    zmachine::command inputmeta "x"
+    set info [zmachine::info inputmeta]
+    if {[dict get $info inputRequest] ne "char"} {
+        error "expected read_char input request, got: [dict get $info inputRequest]"
+    }
+
+    zmachine::key inputmeta 129
+    set info [zmachine::info inputmeta]
+    if {[dict get $info inputRequest] ne "line"} {
+        error "expected line input request after key, got: [dict get $info inputRequest]"
+    }
+
+    zmachine::destroy inputmeta
+} finally {
+    catch {zmachine::destroy inputmeta}
+    file delete -force $input_story_path
+}
+
+puts "tclzmachine package, configuration, and input metadata APIs loaded successfully"
