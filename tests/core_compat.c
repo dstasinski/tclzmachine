@@ -51,26 +51,48 @@ static uint16_t read_global(const ZMachine *vm, uint8_t variable)
 
 int main(void)
 {
-    /* restart restores dynamic memory and jumps to the initial PC. */
+    /*
+     * restart restores dynamic memory and jumps to the initial PC. Only the
+     * transcription and fixed-pitch bits of live Flags 2 survive; other bits
+     * must come back from the pristine story image before capability refresh.
+     */
     {
         ZMachine vm;
-        init_vm(&vm, 3U, 256U);
+        init_vm(&vm, 5U, 256U);
         vm.initial_pc = 0x30U;
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xB7U; /* restart */
         vm.memory[0x30U] = 0xBAU; /* quit */
         vm.memory[0x50U] = 0x11U;
+
+        /* Original story requests undo (bit 4), but not colour (bit 6). */
+        vm.memory[0x10U] = 0x00U;
+        vm.memory[0x11U] = 0x10U;
+
         vm.initial_dynamic_memory_size = vm.static_memory_addr;
         vm.initial_dynamic_memory = (uint8_t *)malloc(vm.initial_dynamic_memory_size);
         assert(vm.initial_dynamic_memory != NULL);
         memcpy(vm.initial_dynamic_memory, vm.memory,
                vm.initial_dynamic_memory_size);
+
+        /*
+         * During play dynamic memory changes, transcript/fixed-pitch are enabled,
+         * the original undo request is cleared, and colour request bit 6 is set.
+         * Bits 0/1 must survive restart; bit 4 must revert to the story image;
+         * bit 6 must not leak from the previous state of play.
+         */
         vm.memory[0x50U] = 0x99U;
+        vm.memory[0x10U] = 0x00U;
+        vm.memory[0x11U] = 0x43U;
+        vm.flags2 = 0x0043U;
 
         assert(zmachine_run(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_HALTED);
         assert(vm.memory[0x50U] == 0x11U);
         assert(vm.pc == 0x31U);
+        assert(vm.memory[0x10U] == 0x00U);
+        assert(vm.memory[0x11U] == 0x13U);
+        assert(vm.flags2 == 0x0013U);
         free_vm(&vm);
     }
 
