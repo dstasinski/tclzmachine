@@ -4,10 +4,15 @@
  * Cooperative full-game save/restore dispatch and completion.
  *
  * Z-machine save/restore opcodes require host filename interaction. Rather than
- * embedding filesystem or IRC policy in the executor, this wrapper recognizes
- * full-state save/restore requests and yields to Tcl. The host later supplies a
- * path through zmachine_save_file()/zmachine_restore_file(), which use Quetzal
- * persistence and then complete the original opcode's branch/store semantics.
+ * embedding filesystem, account, or IRC policy in the executor, this wrapper
+ * recognizes full-state save/restore requests and yields to Tcl. The host later
+ * supplies a path through zmachine_save_file()/zmachine_restore_file(), which
+ * use Quetzal persistence and then complete the original opcode's branch/store
+ * semantics. zmachine_cancel_file() lets the host decline the request cleanly.
+ *
+ * Failed filesystem/Quetzal operations deliberately leave the VM in its waiting
+ * state so the Tcl application can retry another path or call cancel. Only a
+ * successful completion (or explicit cancel) consumes pending_file_pc.
  */
 
 #include "tclzmachine.h"
@@ -20,6 +25,7 @@
 /* Lexical opcode layer supplied by zmachine_tokenise.c. */
 extern int zmachine_step_tokenise(ZMachine *vm);
 
+/* Record a host/file-layer diagnostic without unconditionally changing state. */
 static int file_error(ZMachine *vm, const char *message)
 {
     if (vm)
@@ -27,7 +33,14 @@ static int file_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
-/* Apply a branch record without forcing the VM into an error on host I/O. */
+/*
+ * Apply the V1-V3 branch record belonging to a completed save/restore opcode.
+ *
+ * This mirrors ordinary VM branch encoding but intentionally does not mark the
+ * VM erroneous for a host I/O failure; the caller decides whether an error is
+ * terminal or retryable. Taken branch offsets 0/1 retain their standard
+ * rfalse/rtrue special meanings.
+ */
 static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
 {
     uint8_t first;
@@ -71,6 +84,7 @@ static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
     return TCL_OK;
 }
 
+/* Apply the V4+ one-byte store record and continue after its destination byte. */
 static int store_result(ZMachine *vm, uint32_t store_pc, uint16_t value)
 {
     uint8_t variable;
@@ -84,7 +98,14 @@ static int store_result(ZMachine *vm, uint32_t store_pc, uint16_t value)
     return TCL_OK;
 }
 
-/* Finish the pending opcode with success/failure at its original continuation. */
+/*
+ * Finish the pending *current* save/restore request with success or failure.
+ *
+ * For V1-V3 `continuation` points at a branch record. V4+ full-game forms use a
+ * store byte instead. Successful ordinary completion returns 1; cancellation
+ * returns the version's normal false/failure result. Full restore is different:
+ * it resumes the *saved* save opcode and is handled separately below.
+ */
 static int complete_request(ZMachine *vm, uint32_t continuation, int success)
 {
     int rc;
@@ -104,12 +125,13 @@ static int complete_request(ZMachine *vm, uint32_t continuation, int success)
 }
 
 /*
- * Recognize only full-game save/restore forms.
+ * Recognize only full-game save/restore forms and suspend before their result.
  *
  * V1-V3 0OP forms branch; V4 0OP forms store. V5+ moved full save/restore to
- * EXT:0/EXT:1. Extended forms with operands describe auxiliary-file operations
- * and are deliberately left to later implementation rather than being mistaken
- * for Quetzal full-state saves.
+ * zero-operand EXT:0/EXT:1. Extended forms carrying operands describe auxiliary
+ * memory-region files and are deliberately not mistaken for Quetzal full-state
+ * saves. pending_file_pc records the untouched branch/store continuation so a
+ * later host response can complete exactly the instruction that yielded.
  */
 static int handle_file_request(ZMachine *vm,
                                const ZMachineInstruction *instruction,
@@ -148,7 +170,12 @@ static int handle_file_request(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Public one-instruction entry point above lexical/presentation/core dispatch. */
+/*
+ * Public one-instruction entry point at the top of the layered opcode chain.
+ * Save/restore requests are intercepted before any lower executor can consume
+ * their branch/store bytes; all other instructions delegate to the lexical,
+ * presentation, then core layers.
+ */
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -174,6 +201,14 @@ int zmachine_step(ZMachine *vm)
     return zmachine_step_tokenise(vm);
 }
 
+/*
+ * Complete a VM that is waiting for a save filename.
+ *
+ * The current state is serialized to `path` with the pending opcode continuation
+ * recorded in IFhd. A write failure leaves WAITING_SAVE and pending_file_pc
+ * intact so the host can retry. On success the original save opcode completes
+ * with its version-appropriate success branch/store result and execution resumes.
+ */
 int zmachine_save_file(ZMachine *vm, const char *path)
 {
     uint32_t continuation;
@@ -188,6 +223,15 @@ int zmachine_save_file(ZMachine *vm, const char *path)
     return complete_request(vm, continuation, 1);
 }
 
+/*
+ * Complete a VM that is waiting for a restore filename.
+ *
+ * Restore is transactional inside the Quetzal layer. Failure leaves the current
+ * WAITING_RESTORE request retryable. Success replaces the state of play and
+ * resumes the save point stored in the file: V1-V3 take the saved save branch;
+ * V4+ store 2 into the original save instruction's destination. The current
+ * restore opcode never completes normally on a successful restore.
+ */
 int zmachine_restore_file(ZMachine *vm, const char *path)
 {
     uint32_t saved_pc;
@@ -213,6 +257,11 @@ int zmachine_restore_file(ZMachine *vm, const char *path)
     return rc;
 }
 
+/*
+ * Decline whichever save/restore filename request is currently pending.
+ * No file operation occurs. The suspended opcode receives its normal failure
+ * result (false branch in V1-V3, stored zero in V4+) and VM execution resumes.
+ */
 int zmachine_cancel_file(ZMachine *vm)
 {
     uint32_t continuation;
