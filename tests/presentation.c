@@ -62,17 +62,31 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x23U && vm.state == ZM_STATE_READY);
 
+    /*
+     * Select the upper window, where canonical IRC output is deliberately
+     * discarded. erase_window -1 must then select window 0 as required by the
+     * Standard; otherwise all later narrative text would remain invisible.
+     */
     vm.memory[0x23] = 0xEBU;
     vm.memory[0x24] = 0x7FU;
-    vm.memory[0x25] = 0U;
+    vm.memory[0x25] = 1U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x26U && vm.state == ZM_STATE_READY);
+    assert(vm.current_window == 1U);
+    zmachine_output_append(&vm, "hidden", 6U);
+    assert(Tcl_DStringLength(&vm.output) == 0);
 
+    vm.memory[0x100] = 0xFFU;
+    vm.memory[0x101] = 0xFFU; /* global 16 = -1 */
     vm.memory[0x26] = 0xEDU;
-    vm.memory[0x27] = 0x7FU;
-    vm.memory[0x28] = 1U;
+    vm.memory[0x27] = 0xBFU; /* variable operand */
+    vm.memory[0x28] = 0x10U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x29U && vm.state == ZM_STATE_READY);
+    assert(vm.current_window == 0U);
+    zmachine_output_append(&vm, "V", 1U);
+    assert(strcmp(Tcl_DStringValue(&vm.output), "V") == 0);
+    Tcl_DStringSetLength(&vm.output, 0);
 
     vm.memory[0x29] = 0xEFU;
     vm.memory[0x2A] = 0x5FU;
