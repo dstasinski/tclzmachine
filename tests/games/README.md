@@ -18,7 +18,7 @@ A smaller V3-specific fixture will be added separately so tclzmachine still has 
 
 ## Purpose
 
-The test adventure is deliberately small and predictable. Scripted sessions can use commands such as:
+The test adventure is deliberately small and predictable. The active `repository-story-integration` CTest drives commands including:
 
 ```text
 look
@@ -26,11 +26,17 @@ take lamp
 inventory
 north
 south
-score
-quit
+save
+drop lamp
+north
+restore
+look
+inventory
 ```
 
-These interactions exercise line input and tokenization, parser-driven routine calls, Z-text output, object relationships and movement, properties and attributes, persistent game state, room movement, inventory handling, and ordinary control flow.
+These interactions exercise line input, explicit V5 tokenization, parser-driven routine calls, Z-text output, object relationships and movement, properties and attributes, persistent game state, room movement, inventory handling, ordinary control flow, and the cooperative Tcl save/restore boundary.
+
+The persistence portion saves while the player is in Test Lab carrying the brass lamp, deliberately changes both object ownership and location, then restores the Quetzal file and verifies that Test Lab and the carried lamp return. This makes the fixture an end-to-end check of real Inform parser state plus Quetzal dynamic memory, evaluation stack, routine frames, saved PC, and Tcl file-request handling.
 
 The fixture contains no Infocom source, text, data, or other commercial story content. Official Infocom games may be used separately for local compatibility testing but must not be committed to this repository.
 
@@ -50,4 +56,4 @@ inform6 -v5 "+include_path=${library_dir}" \
   tests/games/compiled/tclzmachine-test.z5
 ```
 
-Once interpreter compatibility with the fixture is complete, CTest will run scripted Tcl conversations against the committed binary as an end-to-end regression test.
+The committed binary is what normal CTest uses, so developers do not need Inform installed merely to run the end-to-end regression.
