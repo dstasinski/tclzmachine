@@ -1,3 +1,18 @@
+/*
+ * vm_exec.c
+ *
+ * Focused regression coverage for the ordinary core instruction executor and
+ * its public helper contracts. The synthetic cases exercise V3/V5 routine
+ * entry/local initialization, return/store behavior, left-to-right operand
+ * resolution, direct and computed indirect-variable references (especially
+ * stack variable 0), call-null semantics, arithmetic/branch instructions,
+ * variable-form signed division/remainder, and dynamic-memory stores.
+ *
+ * Higher cooperative layers such as input, file requests, presentation, and
+ * lexical opcodes have dedicated tests; this file is intended to keep failures
+ * attributable to core execution semantics.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_exec.h"
 
@@ -7,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocate a zeroed synthetic story image with globals and writable memory. */
 static void init_vm(ZMachine *vm, uint8_t version, size_t size)
 {
     memset(vm, 0, sizeof(*vm));
@@ -21,6 +37,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     Tcl_DStringInit(&vm->pending_input);
 }
 
+/* Release storage initialized by init_vm(). */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -28,6 +45,7 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
+/* Read/write global words directly so opcode effects can be asserted. */
 static uint16_t read_global(const ZMachine *vm, uint8_t variable)
 {
     size_t address = (size_t)vm->globals_addr +
@@ -46,6 +64,7 @@ static void write_global(ZMachine *vm, uint8_t variable, uint16_t value)
 
 int main(void)
 {
+    /* V5 routine locals begin at zero, then supplied arguments overwrite them. */
     {
         ZMachine vm;
         uint16_t args[2] = {0x1111U, 0x2222U};
@@ -62,6 +81,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V1-V4 routine headers contain default local words before the first opcode. */
     {
         ZMachine vm;
         uint16_t args[1] = {0x9999U};
@@ -77,6 +97,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Variable operands are resolved left-to-right, so two variable-0 reads pop twice. */
     {
         ZMachine vm;
         ZMachineInstruction insn;
@@ -120,6 +141,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Exercise indirect variable-number opcodes with both constant and computed target 0. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -174,6 +196,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* call_1s enters a routine, rtrue returns to the store continuation. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 1024U);
@@ -187,6 +210,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Calling packed address zero stores false immediately without creating a frame. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -197,6 +221,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Basic signed/value-domain arithmetic store. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -207,6 +232,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* jz true takes the encoded short branch. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -218,6 +244,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* jz false falls through immediately after the branch record. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -228,6 +255,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Indirect global inc followed by load stores the incremented value. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -242,6 +270,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* 2OP store treats operand zero as the resolved target variable number. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -252,6 +281,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* VARIABLE encoding of logical 2OP div/mod preserves signed Z-machine semantics. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
@@ -273,6 +303,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* VAR:1 storew writes a big-endian word at base + 2*index. */
     {
         ZMachine vm;
         init_vm(&vm, 5U, 512U);
