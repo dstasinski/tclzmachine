@@ -129,6 +129,14 @@ void zmachine_destroy(ZMachine *vm);
 int zmachine_load_story(ZMachine *vm, const char *path);
 int zmachine_reset(ZMachine *vm);
 
+/*
+ * Rewrite interpreter-owned/Rst header fields to the capabilities actually
+ * exposed by this text-only runtime. This is called after initial load, restart,
+ * and restore. It intentionally leaves the formal Standards revision at 0.0
+ * until the project has completed a full conformance audit.
+ */
+void zmachine_refresh_interpreter_header(ZMachine *vm);
+
 /* Queue one command and execute until another input/file request, halt, or error. */
 int zmachine_supply_input(ZMachine *vm, const char *line);
 int zmachine_run(ZMachine *vm);
