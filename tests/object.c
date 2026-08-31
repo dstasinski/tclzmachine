@@ -1,3 +1,16 @@
+/*
+ * object.c
+ *
+ * Direct unit coverage for the version-aware object/property subsystem.
+ * Synthetic V3 and V5 object tables verify the two physical entry layouts,
+ * byte-vs-word relationship fields, attribute widths, tree removal/insertion,
+ * property defaults, one- and two-byte property values, property addresses,
+ * descending property iteration, and V4+ two-byte property-size headers.
+ *
+ * These tests call object helpers directly rather than executing opcodes, so a
+ * failure isolates table-layout/property parsing from instruction dispatch.
+ */
+
 #include "tclzmachine.h"
 #include "zmachine_object.h"
 
@@ -6,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Allocate a zeroed synthetic story image with all memory writable. */
 static void init_vm(ZMachine *vm, uint8_t version, size_t size, uint16_t object_table)
 {
     memset(vm, 0, sizeof(*vm));
@@ -20,6 +34,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size, uint16_t object_
     Tcl_DStringInit(&vm->pending_input);
 }
 
+/* Release storage owned by init_vm(). */
 static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
@@ -27,17 +42,20 @@ static void free_vm(ZMachine *vm)
     Tcl_DStringFree(&vm->pending_input);
 }
 
+/* Write one big-endian synthetic story word. */
 static void put16(uint8_t *memory, size_t address, uint16_t value)
 {
     memory[address] = (uint8_t)(value >> 8);
     memory[address + 1U] = (uint8_t)value;
 }
 
+/* Return an object's entry address under the V1-V3 31-default/9-byte layout. */
 static size_t v3_entry(size_t table, unsigned object)
 {
     return table + 62U + (object - 1U) * 9U;
 }
 
+/* Return an object's entry address under the V4+ 63-default/14-byte layout. */
 static size_t v5_entry(size_t table, unsigned object)
 {
     return table + 126U + (object - 1U) * 14U;
@@ -45,6 +63,7 @@ static size_t v5_entry(size_t table, unsigned object)
 
 int main(void)
 {
+    /* V3 relationships, 32 attributes, removal, and insertion. */
     {
         ZMachine vm;
         uint16_t value;
@@ -80,6 +99,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V3 defaults plus descending one-byte-header property lists. */
     {
         ZMachine vm;
         uint16_t value, addr, next;
@@ -115,6 +135,7 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V5 16-bit relationships, 48 attributes, and both property-header forms. */
     {
         ZMachine vm;
         uint16_t value, next;
