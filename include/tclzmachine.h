@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define TCLZMACHINE_VERSION "0.2.0"
+#define TCLZMACHINE_VERSION "1.0.0"
 #define TCLZMACHINE_TEXT_ONLY 1
 #define ZM_MAX_STREAM3_DEPTH 16U
 #define ZM_AUX_FILENAME_MAX 12U

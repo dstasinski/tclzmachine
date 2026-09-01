@@ -1,14 +1,27 @@
 # tclzmachine
 
-tclzmachine is a lightweight, embeddable, multi-session, **text-only Z-machine runtime** written in C for Tcl applications, with IRC bots as the primary use case.
+tclzmachine 1.0.0 is a lightweight, embeddable, multi-session, **text-only Z-machine runtime** written in C for Tcl 8.6+ applications, with IRC bots as the primary use case.
 
-The project is an independent implementation based on the public Z-machine specification. It does not embed or depend on Frotz, Bocfel, or another Z-machine interpreter.
+The project is an independent implementation based on the public Z-machine specification. It does not embed or depend on Frotz, Bocfel, or another interpreter implementation.
 
-## Compatibility target
+## Release status
 
-The intended VM compatibility target is:
+The `Frobnost` branch is the 1.0.0 release-candidate line. The runtime has complete named-opcode coverage for the supported story versions, a focused deterministic regression suite, repository-owned V3/V5 integration stories, and a manually qualified real-story catalog.
 
-| Z-machine version | Goal |
+The supported-story catalog has completed the startup/`look` smoke probe for **323 of 323 supported stories**. That is strong compatibility evidence, but it is not a claim that every story was played to completion or that every path in every story executed.
+
+See:
+
+- [RELEASE_NOTES_1.0.md](RELEASE_NOTES_1.0.md) for the 1.0.0 release summary and known limits;
+- [CATALOG_COMPATIBILITY.md](CATALOG_COMPATIBILITY.md) for the real-story qualification record;
+- [CONFORMANCE.md](CONFORMANCE.md) for Standards-oriented capability boundaries;
+- [OPCODE_STATUS.md](OPCODE_STATUS.md) for the opcode inventory;
+- [PRESENTATION_AUDIT.md](PRESENTATION_AUDIT.md) for the text-only presentation audit;
+- [SOURCE_DOCUMENTATION_AUDIT.md](SOURCE_DOCUMENTATION_AUDIT.md) for the 1.0 source cleanup record.
+
+## Supported Z-machine versions
+
+| Z-machine version | Status |
 | --- | --- |
 | V1 | Supported |
 | V2 | Supported |
@@ -19,275 +32,55 @@ The intended VM compatibility target is:
 | V7 | Supported |
 | V8 | Supported |
 
-V6 is excluded because its presentation model is unusually screen-oriented and does not fit the project's IRC/text-only purpose. V7 and V8 are retained because their VM model follows the V5 text-oriented model while extending address/file-size rules useful for larger Z-code games.
-
-The interpreter does not expose graphics, cursor positioning, mouse input, sound, fonts, menus, or rich terminal layout. Canonical VM output is always plain UTF-8. A Tcl host may optionally select mIRC presentation, in which case Z-machine foreground/background colours plus bold, italic, and reverse styles are translated to IRC control codes while the underlying canonical text remains unchanged. Fixed-pitch style has no useful IRC equivalent and remains visually neutral.
-
-## Current status
-
-The runtime now contains a working execution core rather than only starter scaffolding. Implemented areas include:
-
-- Tcl 8.6 loadable C extension
-- independent named game sessions
-- Z-machine story-file loading
-- header parsing for V1-V5, V7, and V8
-- explicit rejection of V6
-- version-specific story-length scaling and packed-address decoding
-- V7 routine and string offset support
-- per-session story memory, program counter, evaluation stack, call frames, random state, input, and output
-- instruction decoding for LONG, SHORT, VARIABLE, and V5+ EXTENDED forms
-- variable, local, global, stack, store, branch, and indirect-variable semantics
-- routine calls and returns, including V5+ `catch` / `throw`
-- arithmetic, logical, shift, memory, control-flow, object, attribute, and property opcodes used by current compatibility tests
-- Z-text decoding, abbreviations, default/custom alphabets, inline strings, object short names, and canonical UTF-8 output
-- standard default ZSCII 155-223 Unicode translations and V5+ story-defined Unicode translation tables through header-extension word 3
-- cooperative `read` and `read_char` suspension/resumption, including V5+ preloaded line-input buffers
-- printable-ASCII host line validation plus exact numeric ZSCII key input for `read_char` and V5+ terminating-character-table line completion
-- Z-machine input stream 1 command replay, output stream 2 transcript files, and output stream 4 command/key recording through host-selected paths
-- dictionary lookup, parse-buffer tokenization, V5+ `tokenise`, and `encode_text`, including custom alphabet tables and standard lowercase dictionary encryption
-- restart, verify, random, scan-table, argument-count, and related compatibility behavior
-- form-aware cooperative dispatch which keeps EXTENDED opcodes distinct from VAR-table opcodes
-- text-only presentation handling including nested output stream 3 memory capture with original ZSCII-byte preservation
-- optional per-session mIRC rendering of Z-machine standard/true colours and bold, italic, and reverse text styles while retaining plain canonical VM output
-- dynamically allocated one-level `save_undo` / `restore_undo` state restoration
-- cooperative full-game save/restore with Quetzal FORM IFZS persistence
-- V5+ operand-bearing auxiliary save/restore byte-region files
-- Quetzal UMem writing plus UMem and compressed CMem restore support
-- optional per-session UTF-8-safe byte-oriented word wrapping for IRC payloads, including formatting-aware wrapping in mIRC mode
-- focused CTest coverage for decoder, state, object, text, input, execution, property, undo, Quetzal, external/auxiliary files, presentation, mIRC rendering, tokenization, wrapping, and operand-side-effect behavior
-- repository-owned V3 and V5 end-to-end Tcl integration stories, including full-game save/restore
-- manual real-story compatibility probes
-
-### Real-game compatibility reached so far
-
-An official Version 3 Zork I story (Revision 88 / serial 840726) has been tested locally through the Tcl API. The runtime successfully boots the story, reaches the input prompt, and preserves state across a multi-turn sequence including:
-
-```text
-look
-open mailbox
-take leaflet
-read leaflet
-inventory
-```
-
-The local compatibility catalog has completed its startup/input smoke probe for all 33 tested story files, including V5 cases which exposed presentation-table, indirect-variable, null-object, lexical-opcode, and extended-opcode dispatch issues during development. This remains a smoke-test milestone rather than a claim of complete Z-machine conformance.
-
-Official story files themselves are **not** committed to this repository.
-
-## Tcl API
-
-Load the package and create one independent game session:
-
-```tcl
-package require tclzmachine
-
-zmachine::create game1 /path/to/zork1.z3
-```
-
-Send one player command. `zmachine::command` is the line-oriented API used for `read`/`sread`/`aread` input. The current host keyboard contract accepts printable ASCII ZSCII (space through `~`) and rejects control bytes or non-ASCII Tcl UTF-8 input rather than misinterpreting multibyte UTF-8 as multiple ZSCII characters:
-
-```tcl
-set response [zmachine::command game1 "look"]
-puts $response
-```
-
-The call resumes the VM and returns when the story asks for another line/character of input, requests a save/restore or external stream filename, halts, or encounters an error.
-
-Use `zmachine::key` to supply one exact numeric ZSCII keyboard event when the story is waiting for character input:
-
-```tcl
-# ZSCII 129 = cursor up
-set response [zmachine::key game1 129]
-puts $response
-```
-
-For `read_char`, `zmachine::key` accepts ordinary keyboard-input ZSCII such as Enter (`13`), Escape (`27`), printable ASCII (`32`-`126`), cursor/function/keypad codes (`129`-`154`), and extra-character codes that are defined by the story's active Unicode translation table. Undefined/reserved codes are rejected without consuming the pending input request, so the host may retry. Mouse/menu event codes `252`-`254` are intentionally unavailable because this text-only runtime exposes no mouse or click-position state.
-
-For a suspended line read, `zmachine::key` may supply Enter (`13`) or, in V5 and later, a keyboard function key (`129`-`154`) named by the story's terminating-character table at header word `$2e`. Table value `255` means any function key. The terminating key becomes `aread`'s stored result and is not inserted into the text buffer; any V5+ preloaded text already in that buffer is preserved and tokenized normally. An unlisted function key is rejected without consuming the pending line read.
-
-The older convenience behavior remains: if a normal `zmachine::command` reaches `read_char` while its command string is already queued, the first printable ASCII character can satisfy that request. `zmachine::key` is the unambiguous API for non-ASCII ZSCII keyboard events.
-
-Inspect session metadata:
-
-```tcl
-set info [zmachine::info game1]
-puts $info
-```
-
-`inputRequest` is empty when no cooperative input is pending, `line` while the session is suspended on `read`/`sread`/`aread`, and `char` while it is suspended on `read_char`. This lets an embedding bot choose between `zmachine::command` and `zmachine::key` without decoding VM instructions itself.
-
-External Z-machine stream and presentation state is reported through:
-
-- `streamRequest` - empty normally, or `replay`, `transcript`, or `record` while the story is waiting for a host path
-- `inputStream` - `0` for interactive Tcl input or `1` while command-file replay is selected
-- `commandRecording` - boolean indicating whether output stream 4 is currently recording commands/key presses
-- `outputFormat` - `plain` by default, or `mirc` when IRC formatting output is selected
-
-`fileRequest` is independent of those stream fields. It is empty during ordinary play and becomes `save` or `restore` when the story has yielded for save/restore file selection. `fileRequestKind` is `full` for a complete Quetzal game-state request and `auxiliary` for a V5+ byte-region file request.
-
-For auxiliary requests, the same dictionary also exposes:
-
-- `suggestedFileName` - the story's filename normalized to uppercase 8.3-style form, with `.AUX` added when no extension was supplied
-- `filePrompt` - `-1` when the optional prompt operand was omitted, `0` when the story requests silent filename use, or `1` when it requests confirmation
-- `fileTable` - the story-memory address of the byte region
-- `fileBytes` - the requested maximum byte count
-
-The embedding application remains responsible for translating all filename requests into safe host paths.
-
-### mIRC colour and text-style output
-
-Plain output remains the default. For an IRC bot which understands traditional mIRC formatting controls, enable the optional renderer after creating the session and before beginning play:
-
-```tcl
-zmachine::configure game1 -format mirc
-```
-
-Query or restore the setting with:
-
-```tcl
-puts [zmachine::configure game1 -format]
-zmachine::configure game1 -format plain
-```
-
-When mIRC output is selected, the interpreter advertises colour, bold, and italic capability to the story and translates the story's presentation state into IRC controls. Standard Z-machine colours map to the traditional mIRC palette: black `01`, red `04`, green `03`, yellow `08`, blue `02`, magenta `06`, cyan `10`, and white `00`. `set_true_colour` values are approximated to the nearest available traditional mIRC colour, which is permitted by the Z-machine Standard when the requested colour cannot be reproduced exactly.
-
-`set_text_style` maps bold, italic, and reverse video to their corresponding mIRC control codes. Fixed-pitch is tracked so Z-machine state remains coherent but has no IRC rendering effect. Roman/default style clears active emphasis. Formatting is reset at physical line boundaries and re-established where needed so newline-delimited output can be sent as independent IRC messages without style leakage into later bot traffic.
-
-This is strictly a host presentation feature: transcript files, command files, stream-3 memory tables, parser input, Quetzal state, and `zmachine_output_data()` remain free of IRC control bytes.
-
-### Command replay, transcript, and recording streams
-
-Z-machine command/replay and transcript filenames are host policy just like saved-game filenames. When a story first selects input stream 1, output stream 2, or output stream 4 and no path has been configured yet, execution yields and `streamRequest` identifies the needed file. Supply it with:
-
-```tcl
-set info [zmachine::info game1]
-set request [dict get $info streamRequest]
-
-switch -- $request {
-    replay {
-        set more [zmachine::streamfile game1 replay /safe/path/commands.txt]
-    }
-    transcript {
-        set more [zmachine::streamfile game1 transcript /safe/path/transcript.txt]
-    }
-    record {
-        set more [zmachine::streamfile game1 record /safe/path/commands.out]
-    }
-}
-```
-
-`zmachine::streamfile` may also be called before a story selects a stream to preconfigure its path. Once a transcript or command-recording file has been chosen, deselecting and reselecting that stream reuses the same open file rather than asking the host for a filename repeatedly. `zmachine::cancel game1` declines a pending stream request and lets execution continue with that external stream unselected.
-
-Input stream 1 automatically feeds command records while the story is waiting on `read` or `read_char`. At end of file, replay closes and input returns to stream 0 so Tcl can resume interactive input.
-
-Output stream 4 and input stream 1 share a simple human-readable command format compatible with the Standard's suggested `[N]` convention:
-
-```text
-look
-turn it on.[154]
-[129]
-```
-
-The first line is an ordinary Enter-terminated command. The second is a line terminated by ZSCII function key `154`. A line containing only `[129]` represents an exact `read_char` keypress. Output stream 4 writes a completed command in one operation after input finishes; exact `read_char` keys are written as their numeric marker.
-
-When transcript stream 2 is active, story output is copied to its UTF-8 host file and V1-V5 completed line input is echoed there. While output stream 3 is active, its standard exclusive-output behavior suppresses story text from the other selected output streams. Completed V1-V5 line input is also preserved in the canonical VM output returned through Tcl as required by the Z-machine input-echo rules. If an IRC or other embedding application wants to avoid displaying a command twice because the transport already showed the user's message, that suppression belongs to host presentation policy rather than the VM core.
-
-### Save/restore handshake
-
-Filename policy deliberately belongs to Tcl/the embedding application rather than the VM. When a story executes a full-game or auxiliary save/restore opcode, execution yields. The host can choose a path, retry after an I/O error, or decline the request.
-
-Example save handling:
-
-```tcl
-set text [zmachine::command game1 "save"]
-puts $text
-
-set info [zmachine::info game1]
-if {[dict get $info fileRequest] eq "save"} {
-    if {[dict get $info fileRequestKind] eq "auxiliary"} {
-        puts "Story suggested: [dict get $info suggestedFileName]"
-    }
-    set more [zmachine::save game1 /path/chosen/by/the/host]
-    puts $more
-}
-```
-
-Restore works the same way:
-
-```tcl
-set text [zmachine::command game1 "restore"]
-puts $text
-
-if {[dict get [zmachine::info game1] fileRequest] eq "restore"} {
-    set more [zmachine::restore game1 /path/chosen/by/the/host]
-    puts $more
-}
-```
-
-To tell the story that the player declined the filename request or that the host does not want to retry a failed file operation:
-
-```tcl
-zmachine::cancel game1
-```
-
-For a full-game request, a successful save makes the story's save opcode return success, while a successful restore transfers execution back to the original save point with the version-appropriate restored result or branch behavior. Full-game files use Quetzal `FORM IFZS`; tclzmachine writes the required `IFhd`, `UMem`, and `Stks` chunks and accepts either `UMem` or standard compressed `CMem` when restoring.
-
-For a V5+ auxiliary request, `zmachine::save` writes exactly the requested story-memory bytes and stores `1` on success. `zmachine::restore` reads at most the requested byte count into dynamic memory and stores the number of bytes actually loaded; a missing auxiliary file stores `0`. Auxiliary files are not part of the saved state of play. Cancel stores the normal failure result `0` for an auxiliary request.
-
-Configure optional output wrapping. The value is a maximum byte count per returned physical line; `0` disables automatic wrapping and is the default:
-
-```tcl
-zmachine::configure game1 -wordwrap 400
-```
-
-Destroy the session when finished:
-
-```tcl
-zmachine::destroy game1
-```
-
-## IRC-oriented output wrapping
-
-Wrapping is intentionally a **presentation-layer feature**. The Z-machine core always generates canonical, unwrapped text. `zmachine::command`, `zmachine::key`, and stream/file-request completion calls apply the configured session limit only while returning that text to Tcl.
-
-The wrapper:
-
-- measures limits in bytes rather than characters
-- prefers whitespace boundaries
-- preserves story-supplied newlines
-- does not split inside a UTF-8 code point
-- can hard-wrap a single long word when necessary
-- in mIRC mode, treats colour/style sequences as atomic formatting tokens and re-establishes active formatting on newly inserted lines
-- is disabled by default
-
-This lets an IRC bot choose a conservative payload size while leaving room for the IRC command, target, tags, prefix, CRLF framing, and any mIRC formatting bytes.
-
-Example:
-
-```tcl
-zmachine::configure game1 -format mirc
-zmachine::configure game1 -wordwrap 380
-
-foreach line [split [zmachine::command game1 "look"] "\n"] {
-    # Send $line through the bot's IRC library.
-}
-```
+V6 is excluded because its presentation model depends heavily on pixel-positioned windows, graphics, and richer terminal state that do not fit this project's Tcl/IRC text-only architecture. V7 and V8 are supported using their V5-derived text-oriented semantics plus their version-specific packed-address and file-size rules.
+
+## What 1.0 provides
+
+The runtime includes:
+
+- Tcl 8.6 loadable C extension with independent named game sessions;
+- story loading and header handling for V1-V5, V7, and V8;
+- LONG, SHORT, VARIABLE, and V5+ EXTENDED instruction decoding;
+- version-aware legality/arity/literal preflight before observable operand side effects;
+- evaluation stack, local/global variables, routine frames, calls/returns, branches, stores, `catch`/`throw`, and indirect-variable semantics;
+- arithmetic, logical, shifts, memory, object, attribute, property, control-flow, text, lexical, stream, file, save/restore, and compatibility opcodes required by the supported-version inventory;
+- Z-text decoding, abbreviations, default/custom alphabets, object short names, ZSCII, and story-defined Unicode translation tables;
+- cooperative line and character input, including V5+ preloaded line buffers and terminating-character-table function keys;
+- command replay, transcript output, command/key recording, and nested output stream 3 memory capture;
+- dictionary lookup, tokenization, `tokenise`, and `encode_text`;
+- restart, checksum verification, random, scan-table, and argument-count behavior;
+- one-level `save_undo` / `restore_undo` support;
+- cooperative Quetzal full-game save/restore with `IFhd`, `UMem`, `Stks`, and compressed `CMem` restore support;
+- V5+ auxiliary byte-region save/restore requests;
+- optional mIRC colour/style rendering that leaves canonical VM output plain;
+- optional UTF-8-safe byte-count wrapping for IRC payloads;
+- 33 CTest entries, including public Tcl package smoke coverage and repository-owned V3/V5 story integration tests.
+
+## Deliberate text-only boundaries
+
+Canonical VM output is plain UTF-8. The runtime does **not** provide a full terminal/window implementation, graphics, mouse state, menus, sampled sound, or V6 presentation semantics. Upper/status-window behavior is reduced conservatively rather than emulated as a fake terminal.
+
+Timed `read` and `read_char` capability is not advertised. For compatibility with shipped older stories that nevertheless issue timed forms, those requests degrade to ordinary untimed host input and no timer callback is executed.
+
+The optional mIRC renderer can advertise and render standard/true colours plus bold and italic emphasis when the host enables it. Fixed-pitch has no useful IRC equivalent. Plain output does not advertise formatting it cannot render.
+
+The formal Z-machine Standards revision header bytes remain **0.0**. tclzmachine 1.0.0 should therefore be described as supporting story versions 1-5, 7, and 8 in a text-only runtime, **not** as formally Z-machine Standard 1.0/1.1 conformant. See `CONFORMANCE.md` for the reasons.
 
 ## Build
 
 Requirements:
 
-- C compiler
-- CMake 3.16+
-- Tcl 8.6 development headers and library
+- C compiler with C99 support;
+- CMake 3.16+;
+- Tcl 8.6 development headers and library.
 
-On Debian/Ubuntu/Linux Mint:
+On Debian, Ubuntu, or Linux Mint:
 
 ```sh
 sudo apt install build-essential cmake tcl8.6-dev
 ```
 
-Build and test:
+Build and run the complete deterministic suite:
 
 ```sh
 cmake -S . -B build -DTCLZMACHINE_BUILD_TESTS=ON
@@ -301,20 +94,186 @@ Install:
 sudo cmake --install build
 ```
 
+The 1.0.0 package installs beneath the platform library directory in a versioned `tclzmachine1.0.0` directory containing the shared library and generated `pkgIndex.tcl`.
+
+## Tcl package and API
+
+Load the installed package with:
+
+```tcl
+package require tclzmachine 1.0.0
+```
+
+The public Tcl commands are:
+
+| Command | Purpose |
+| --- | --- |
+| `zmachine::create session storyfile` | Create a named session and load a story. |
+| `zmachine::command session text` | Supply line-oriented player input and resume execution. |
+| `zmachine::key session zsciiCode` | Supply one exact ZSCII key event. |
+| `zmachine::info session` | Return VM/cooperative-request metadata as a Tcl dict. |
+| `zmachine::configure session ?option ?value??` | Query/set host presentation options. |
+| `zmachine::streamfile session kind path` | Supply or preconfigure replay/transcript/record paths. |
+| `zmachine::save session path` | Complete a pending full or auxiliary save request. |
+| `zmachine::restore session path` | Complete a pending full or auxiliary restore request. |
+| `zmachine::cancel session` | Decline a pending save/restore/stream-file request. |
+| `zmachine::destroy session` | Destroy a session and release its resources. |
+
+### Basic session
+
+```tcl
+package require tclzmachine 1.0.0
+
+zmachine::create game1 /path/to/story.z5
+
+set text [zmachine::command game1 "look"]
+puts $text
+
+zmachine::destroy game1
+```
+
+`zmachine::command` resumes the VM until the story requests more line/character input, requests a host filename, halts, or fails. Line input accepts printable ASCII host text; the runtime rejects arbitrary Tcl UTF-8 rather than misinterpreting multibyte input as multiple ZSCII bytes.
+
+### Exact key input
+
+Use `zmachine::key` while the story is waiting on `read_char`, or to terminate a V5+ line read with a function key named by the story's terminating-character table:
+
+```tcl
+# ZSCII 129 = cursor up
+set text [zmachine::key game1 129]
+```
+
+Supported keyboard-style key values include Enter (`13`), Escape (`27`), printable ASCII (`32`-`126`), cursor/function/keypad codes (`129`-`154`), and extra-character codes defined by the story's active Unicode translation table. Mouse/menu event codes are intentionally unavailable.
+
+### Session metadata
+
+```tcl
+set info [zmachine::info game1]
+```
+
+Important keys include:
+
+- `version` and `supportedVersions`;
+- `textOnly`;
+- `pc`, `memorySize`, and `declaredFileLength`;
+- `state`;
+- `inputRequest` — empty, `line`, or `char`;
+- `inputStream` — `0` for Tcl keyboard input or `1` for replay;
+- `streamRequest` — empty, `replay`, `transcript`, or `record`;
+- `commandRecording`;
+- `outputFormat` — `plain` or `mirc`;
+- `fileRequest` — empty, `save`, or `restore`;
+- `fileRequestKind` — empty, `full`, or `auxiliary`;
+- `suggestedFileName`, `filePrompt`, `fileTable`, and `fileBytes` for auxiliary file requests;
+- `wordWrapBytes`.
+
+The Tcl host owns filesystem policy. Stories can request files, but the extension never decides an arbitrary host path on their behalf.
+
+## Save/restore handshake
+
+A story save/restore opcode yields to Tcl so the host can choose a safe path.
+
+```tcl
+set text [zmachine::command game1 "save"]
+puts $text
+
+set info [zmachine::info game1]
+if {[dict get $info fileRequest] eq "save"} {
+    puts [zmachine::save game1 /safe/path/game.sav]
+}
+```
+
+Restore is symmetrical:
+
+```tcl
+set text [zmachine::command game1 "restore"]
+if {[dict get [zmachine::info game1] fileRequest] eq "restore"} {
+    puts [zmachine::restore game1 /safe/path/game.sav]
+}
+```
+
+Decline the pending request with:
+
+```tcl
+zmachine::cancel game1
+```
+
+Full-game files use Quetzal `FORM IFZS`. V5+ auxiliary requests transfer only the story-selected byte range and expose their metadata through `zmachine::info`.
+
+## Replay, transcript, and recording streams
+
+When a story first requests a replay, transcript, or command-recording file and no path is configured, execution yields with `streamRequest` set appropriately.
+
+```tcl
+set request [dict get [zmachine::info game1] streamRequest]
+
+switch -- $request {
+    replay     { zmachine::streamfile game1 replay /safe/path/commands.txt }
+    transcript { zmachine::streamfile game1 transcript /safe/path/transcript.txt }
+    record     { zmachine::streamfile game1 record /safe/path/commands.out }
+}
+```
+
+`zmachine::streamfile` can also be called before the story selects the stream. Replay and recording share the Standard-style human-readable `[N]` key marker convention, for example:
+
+```text
+look
+turn it on.[154]
+[129]
+```
+
+Output stream 3 remains VM memory output: it stores raw ZSCII bytes and is kept separate from UTF-8 host transcript output and optional mIRC presentation.
+
+## Optional mIRC presentation
+
+Plain output is the default:
+
+```tcl
+zmachine::configure game1 -format plain
+```
+
+For an IRC client that understands traditional mIRC controls:
+
+```tcl
+zmachine::configure game1 -format mirc
+```
+
+The renderer maps Z-machine colours to the traditional mIRC palette and supports bold, italic, and reverse-video controls. `set_true_colour` is approximated to the nearest available traditional mIRC colour where exact reproduction is impossible.
+
+mIRC controls are host presentation only. They never contaminate transcript files, command files, stream-3 tables, parser input, Quetzal state, or `zmachine_output_data()`.
+
+## IRC-oriented output wrapping
+
+Word wrapping is disabled by default. Set a maximum returned byte count per physical line with:
+
+```tcl
+zmachine::configure game1 -wordwrap 380
+```
+
+The wrapper measures bytes, prefers whitespace boundaries, preserves story newlines, does not split a UTF-8 code point, and can hard-wrap a long word when necessary. In mIRC mode, formatting controls remain atomic and active formatting is re-established after inserted line breaks without producing control-only continuation lines.
+
+A bot can then send each returned line independently:
+
+```tcl
+foreach line [split [zmachine::command game1 "look"] "\n"] {
+    # Send $line using the bot's IRC library.
+}
+```
+
 ## Real-story compatibility probes
 
-Official Infocom story files are copyrighted and must not be added to this repository. Local copies can be tested with the supplied Tcl probes.
+Third-party story files are not committed to this repository. Local copies can be tested with the supplied probes.
 
-Single command:
+Single story:
 
 ```sh
 tclsh tests/probe_story.tcl \
     ./build/tclzmachine.so \
-    /path/to/story.z3 \
+    /path/to/story.z5 \
     look
 ```
 
-Multiple commands in one persistent session:
+Persistent multi-command session:
 
 ```sh
 tclsh tests/probe_session.tcl \
@@ -326,62 +285,51 @@ tclsh tests/probe_session.tcl \
     "inventory"
 ```
 
-When a story reaches an unimplemented opcode, the probe prints the VM diagnostic and session state so compatibility work can proceed from the exact failing instruction rather than by guessing.
+Catalog startup/`look` smoke probe:
 
-## Project-owned integration games
-
-The repository contains two purpose-built interactive-fiction fixtures under `tests/games/`. Their human-readable sources and compiled story files are both committed, so normal integration testing does not require an Inform compiler.
-
-```text
-tests/games/
-├── source/
-│   ├── tclzmachine-test.inf
-│   └── tclzmachine-v3.inf
-├── compiled/
-│   ├── tclzmachine-test.z5
-│   └── tclzmachine-v3.z3
-└── README.md
+```sh
+tclsh tests/probe_catalog.tcl \
+    ./build/tclzmachine.so \
+    /path/to/story/catalog
 ```
 
-The V5 fixture uses the current Inform 6 standard library and exercises a real parser, object/inventory state, room movement, V5 lexical opcodes, and Quetzal save/restore through the public Tcl API.
+Failures include VM state plus a byte window around the failing PC so compatibility work can proceed from the exact encoded instruction.
 
-The V3 fixture deliberately uses no standard library so it can be a genuine Version 3 story with the current Inform compiler. Its scripted regression exercises the V1-V3 `sread` text-buffer format, V3 routine/call behavior, byte-sized object-tree links, `get_child`, `get_parent`, `insert_obj`, globals, branching, and V3 branch-form full-game save/restore. The restore test saves from inside a called routine, mutates both location and object ownership, then verifies that the saved call frame and world state are reconstructed.
-
-GitHub Actions rebuilds the deterministic fixtures from source and commits changed binaries back to `Frobnost`; ordinary CTest runs the committed binaries directly.
-
-## Documentation requirement
-
-All project `.c` and `.h` files are expected to be fully commented for the 1.0 release. Comments should explain file purpose, public/internal API contracts, structures and fields, version-specific behavior, non-obvious algorithms, and important Z-machine specification decisions rather than merely restating C syntax.
-
-## Implementation roadmap to 1.0
-
-1. Continue systematic opcode compatibility work using real story files and focused project-owned fixtures as probes.
-2. Complete text-oriented handling for remaining safe presentation/status opcodes.
-3. Broaden owned integration/compatibility coverage for V1, V2, V4, V7, and V8 where targeted fixtures add useful signal.
-4. Complete the source/header documentation audit, including implementation and test sources required by the 1.0 documentation standard.
-5. Harden malformed-story bounds checking, error diagnostics, and Tcl/API documentation.
-6. Run a final standards-oriented release audit beyond the current 33-story startup smoke catalog.
-
-## Version-dependent rules
-
-`src/zmachine_version.c` centralizes compatibility rules that should not be scattered through the opcode engine. In particular:
-
-- V1-V3 packed addresses use `2P`.
-- V4-V5 packed addresses use `4P`.
-- V7 routine addresses use `4P + 8R_O` and string addresses use `4P + 8S_O`.
-- V8 packed addresses use `8P`.
-- Header file-length words scale by 2 for V1-V3, 4 for V4-V5, and 8 for V7-V8.
-
-## IRC-oriented architecture
-
-A game session remains resident as one native VM instance:
+The qualified supported-version corpus currently contains 323 stories and has produced:
 
 ```text
-IRC/Tcl -> one input line/key -> VM executes -> next input/file request -> Tcl
+PASS=323
+FAIL=0
+SKIP=0
+TOTAL=323
 ```
 
-IRC framing, flood control, user ownership, authentication, save/stream-path policy, channel routing, and bot-specific behavior belong in Tcl/the bot rather than the VM core. The optional mIRC renderer is deliberately the last presentation transformation before Tcl receives output; canonical VM text and persistent game state never contain IRC controls.
+See `CATALOG_COMPATIBILITY.md` for the exact checkpoints and interpretation.
 
-## Licensing
+## Project-owned integration stories
 
-No third-party Z-machine interpreter source is included. The repository's license applies to this independent implementation; official Infocom story data is not part of the project.
+The repository contains deterministic V3 and V5 fixtures under `tests/games/` with both source and compiled stories committed. Ordinary CTest therefore does not require an Inform compiler.
+
+The V5 fixture uses the Inform 6 standard library and exercises a real parser, object/inventory state, room movement, lexical operations, and Quetzal save/restore through the public Tcl API.
+
+The V3 fixture deliberately avoids the standard library and exercises V1-V3 line-buffer format, routine/call behavior, byte-sized object-tree links, object movement, globals, branching, and V3 branch-form full-game save/restore.
+
+GitHub Actions additionally rebuilds those deterministic stories from source and verifies that the committed binaries are current.
+
+## Architecture
+
+A session remains resident as one native VM instance:
+
+```text
+IRC/Tcl -> input line/key -> VM executes -> input/file request -> Tcl
+```
+
+C owns Z-machine semantics, story memory, decoding, execution, persistence, and low-level validation. Tcl/the embedding application owns session names, safe filesystem paths, IRC routing, authentication, flood control, and other host policy.
+
+Canonical output is deliberately presentation-neutral. The optional mIRC renderer is a final host-facing transformation rather than VM state.
+
+## Licensing and story files
+
+No third-party Z-machine interpreter source is included. The repository license applies to this independent implementation.
+
+Commercial, freeware, or other third-party story files used for compatibility testing are not part of the project and must not be committed unless their licensing explicitly permits redistribution.

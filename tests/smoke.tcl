@@ -10,9 +10,9 @@ if {$argc != 1} {
 }
 
 load [lindex $argv 0] Tclzmachine
-package require tclzmachine
+package require tclzmachine 1.0.0
 
-if {[package present tclzmachine] ne "0.2.0"} {
+if {[package present tclzmachine] ne "1.0.0"} {
     error "unexpected package version"
 }
 

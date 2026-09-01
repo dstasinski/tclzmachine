@@ -1,12 +1,35 @@
-# Story catalog compatibility checkpoint
+# Story catalog compatibility checkpoints
 
 This document records reproducible manual compatibility checkpoints against real Z-machine story files. It complements the deterministic repository tests and `CONFORMANCE.md`; it is not a substitute for either one.
 
-## 2026-09-01 supported-story checkpoint
+## 2026-09-01 pre-1.0 cleanup requalification
 
 Branch: `Frobnost`
 
-Tested commit:
+Tested cleanup commit:
+
+```text
+03b5277ea5979530496225e1f1ceeff7b08c46df
+```
+
+After the source-documentation/release-cleanup sweep removed the obsolete duplicate cooperative run loop, the complete deterministic test suite passed locally and the filtered supported-story catalog under `/home/daniel/z/` completed successfully again.
+
+Verified supported-story result:
+
+```text
+PASS=323
+FAIL=0
+SKIP=0
+TOTAL=323
+```
+
+This requalification is important because it demonstrates that deleting the dead legacy run path did not change the behavior exercised by the supported real-story corpus.
+
+## 2026-09-01 compatibility-hardening checkpoint
+
+Branch: `Frobnost`
+
+Original catalog-qualified runtime commit:
 
 ```text
 8ead25b86d6901be2eb2160a6d55fea350bf592b
@@ -31,9 +54,9 @@ TOTAL=323
 
 This means every story in the filtered supported-version corpus successfully completed the probe. It does **not** mean every game has been played to completion, that every code path in every story has executed, or that the interpreter claims formal Z-machine Standard 1.0/1.1 conformance.
 
-## Mixed-directory result immediately preceding the checkpoint
+## Mixed-directory result immediately preceding the original checkpoint
 
-The broader local directory contained 327 files. After the compatibility fixes in this hardening cycle, its only non-passing entries were four correct skips:
+The broader local directory contained 327 files. After the compatibility fixes in that hardening cycle, its only non-passing entries were four correct skips:
 
 - `advent.z6` — Version 6, intentionally outside the text-only runtime scope;
 - `moments.z6` — Version 6, intentionally outside the text-only runtime scope;
@@ -73,8 +96,10 @@ For release qualification, preserve the exact Git commit, the probe summary, and
 
 ## Interpretation for the 1.0 line
 
-Accurate release language is still:
+Accurate release language is:
 
 > Supports Z-machine story versions 1-5, 7, and 8 in a text-only Tcl/IRC runtime, with complete named-opcode coverage for those versions and conservative capability advertisement. Version 6 is intentionally unsupported.
 
-The 323/323 result is strong real-story compatibility evidence for that statement. It does not change the deliberate decision to leave the formal Standards revision bytes at `0.0` while the text/presentation model remains intentionally reduced.
+The 323/323 results are strong real-story compatibility evidence for that statement. They do not change the deliberate decision to leave the formal Standards revision bytes at `0.0` while the text/presentation model remains intentionally reduced.
+
+The final 1.0.0 tag should be created only after the exact release-metadata commit has both a green full CI run and another successful supported-story catalog probe.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tclzmachine VERSION 0.2.0 LANGUAGES C)
+project(tclzmachine VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -117,9 +117,12 @@ endif()
 
 set_target_properties(tclzmachine PROPERTIES PREFIX "" OUTPUT_NAME "tclzmachine")
 include(GNUInstallDirs)
-install(TARGETS tclzmachine LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/tclzmachine0.2.0 RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/tclzmachine0.2.0)
+set(TCLZMACHINE_PACKAGE_DIR "${CMAKE_INSTALL_LIBDIR}/tclzmachine${PROJECT_VERSION}")
+install(TARGETS tclzmachine
+        LIBRARY DESTINATION ${TCLZMACHINE_PACKAGE_DIR}
+        RUNTIME DESTINATION ${TCLZMACHINE_PACKAGE_DIR})
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkgIndex.tcl.in ${CMAKE_CURRENT_BINARY_DIR}/pkgIndex.tcl @ONLY)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pkgIndex.tcl DESTINATION ${CMAKE_INSTALL_LIBDIR}/tclzmachine0.2.0)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pkgIndex.tcl DESTINATION ${TCLZMACHINE_PACKAGE_DIR})
 
 if(TCLZMACHINE_BUILD_TESTS)
     enable_testing()
