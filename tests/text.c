@@ -5,8 +5,9 @@
  * dispatch. Hand-packed strings verify V3 alphabet shifts/newlines,
  * abbreviation expansion and continuation addresses, V5 custom alphabets,
  * the standard extra-ZSCII Unicode table, story-defined Unicode mappings, safe
- * fallback for undefined entries, and the distinction between UTF-8 stream-1
- * rendering and raw ZSCII bytes captured by memory stream 3.
+ * fallback for undefined entries, legacy TAB reduction, and the distinction
+ * between UTF-8 stream-1 rendering and raw ZSCII bytes captured by memory
+ * stream 3.
  */
 
 #include "tclzmachine.h"
@@ -130,6 +131,28 @@ int main(void)
         assert(zmachine_text_output_zscii(&vm, 220U) == TCL_OK); /* U+0153 */
         assert(strcmp(zmachine_output_data(&vm),
                       "\xC3\xA4\xC5\x93") == 0);
+        free_vm(&vm);
+    }
+
+    /*
+     * ZSCII 9 is formally a V6 output TAB. Legacy V5 stories can still emit it;
+     * this text-only runtime reduces it to one space, including in stream 3.
+     */
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 512U);
+
+        assert(zmachine_text_output_zscii(&vm, 9U) == TCL_OK);
+        assert(strcmp(zmachine_output_data(&vm), " ") == 0);
+
+        Tcl_DStringSetLength(&vm.output, 0);
+        vm.stream3_depth = 1U;
+        vm.stream3_tables[0] = 0xA0U;
+        vm.memory[0xA0U] = 0U;
+        vm.memory[0xA1U] = 0U;
+        assert(zmachine_text_output_zscii(&vm, 9U) == TCL_OK);
+        assert(vm.memory[0xA0U] == 0U && vm.memory[0xA1U] == 1U);
+        assert(vm.memory[0xA2U] == 32U);
         free_vm(&vm);
     }
 
