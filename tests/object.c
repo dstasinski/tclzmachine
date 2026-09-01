@@ -129,6 +129,13 @@ int main(void)
         assert(zmachine_object_put_prop(&vm, 1U, 10U, 0xBEEFU) == TCL_OK);
         assert(zmachine_object_get_prop(&vm, 1U, 10U, &value) == TCL_OK && value == 0xBEEFU);
         assert(zmachine_object_get_prop_addr(&vm, 1U, 10U, &addr) == TCL_OK && addr == 0x202U);
+
+        /* Old Inform code may probe the null object/property through get_prop_addr. */
+        addr = 0xffffU;
+        assert(zmachine_object_get_prop_addr(&vm, 0U, 10U, &addr) == TCL_OK && addr == 0U);
+        addr = 0xffffU;
+        assert(zmachine_object_get_prop_addr(&vm, 1U, 0U, &addr) == TCL_OK && addr == 0U);
+
         assert(zmachine_object_get_next_prop(&vm, 1U, 0U, &next) == TCL_OK && next == 10U);
         assert(zmachine_object_get_next_prop(&vm, 1U, 10U, &next) == TCL_OK && next == 5U);
         assert(zmachine_object_find_property(&vm, 1U, 10U, &info) == TCL_OK && info.length == 2U);
