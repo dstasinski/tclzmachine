@@ -14,6 +14,9 @@
 # session so a crash/error in one game cannot contaminate another VM instance.
 # The script prints a compact summary first and preserves the exact VM/Tcl error
 # for failed stories so missing-opcode work can be prioritized by real usage.
+# A short hexadecimal window around a failing program counter is also reported;
+# this is read from the developer's local story file and is never stored in the
+# repository.
 
 if {$argc < 2 || $argc > 3} {
     puts stderr "usage: probe_catalog.tcl /path/to/tclzmachine.so /path/to/story-directory ?command?"
@@ -37,6 +40,46 @@ if {[catch {load $extension Tclzmachine} err]} {
 if {[catch {package require tclzmachine} err]} {
     puts stderr "unable to require tclzmachine package: $err"
     exit 1
+}
+
+# Return a compact hexadecimal window around a failing story PC. The marker
+# >xx< identifies the byte at the reported PC. This intentionally reads only a
+# few bytes from the local story and never copies story material into fixtures.
+proc story_pc_hex_window {story pc} {
+    if {![string is integer -strict $pc] || $pc < 0} {
+        return ""
+    }
+
+    set start [expr {$pc >= 8 ? $pc - 8 : 0}]
+    set count 24
+    if {[catch {
+        set channel [open $story rb]
+        fconfigure $channel -translation binary -encoding binary
+        seek $channel $start start
+        set data [read $channel $count]
+        close $channel
+    }]} {
+        catch {close $channel}
+        return ""
+    }
+
+    binary scan $data c* bytes
+    set rendered {}
+    set offset 0
+    foreach byte $bytes {
+        set value [expr {$byte & 0xff}]
+        if {$start + $offset == $pc} {
+            lappend rendered [format ">%02x<" $value]
+        } else {
+            lappend rendered [format "%02x" $value]
+        }
+        incr offset
+    }
+
+    if {[llength $rendered] == 0} {
+        return ""
+    }
+    return [format "0x%04x: %s" $start [join $rendered " "]]
 }
 
 # Infocom collections commonly use .dat as well as explicit .zN suffixes.
@@ -113,8 +156,13 @@ foreach story $stories {
             }
         }
 
+        set pcHex ""
+        if {[dict exists $after pc]} {
+            set pcHex [story_pc_hex_window $story [dict get $after pc]]
+        }
+
         puts [format "FAIL  %-32s %s" $name $detail]
-        lappend failures [list $name $detail $after]
+        lappend failures [list $name $detail $after $pcHex]
         zmachine::destroy $session
         continue
     }
@@ -142,6 +190,9 @@ if {[llength $failures] > 0} {
         puts "Error: [lindex $failure 1]"
         if {[llength $failure] > 2} {
             puts "State: [lindex $failure 2]"
+        }
+        if {[llength $failure] > 3 && [lindex $failure 3] ne ""} {
+            puts "Bytes: [lindex $failure 3]"
         }
     }
 }
