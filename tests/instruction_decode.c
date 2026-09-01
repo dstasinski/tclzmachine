@@ -6,7 +6,8 @@
  * forms; logical 2OP-vs-VAR table classification; large/small/variable operand
  * decoding; the second type byte used by call_vs2/call_vn2; the pre-V5 meaning
  * of opcode byte 0xBE; the historical Galatea zero-operand read_char
- * normalization; and deterministic rejection of truncated instructions.
+ * normalization; unavailable timed-input fallback normalization; and
+ * deterministic rejection of truncated instructions.
  *
  * These tests intentionally stop before operand resolution or execution. Their
  * purpose is to lock down the boundary between raw story bytes and the uniform
@@ -139,6 +140,39 @@ int main(void)
         assert(i.operands[0].type == ZM_OPERAND_SMALL_CONSTANT);
         assert(i.operands[0].value == 1);
         assert(i.next_pc == 2);
+    }
+
+    /*
+     * Timed read_char is not advertised by this host. Older stories which
+     * nevertheless encode time/routine operands are treated as ordinary
+     * untimed input without changing their encoded instruction length.
+     */
+    {
+        const uint8_t b[] = {0xf6, 0x53, 0x01, 0x05, 0x01, 0x10};
+        ZMachineInstruction i = decode(b, sizeof(b), 5);
+        assert(i.opcode_number == 22);
+        assert(i.operand_count_actual == 3);
+        assert(i.operands[0].value == 1);
+        assert(i.operands[1].type == ZM_OPERAND_SMALL_CONSTANT);
+        assert(i.operands[1].value == 0);
+        assert(i.operands[2].type == ZM_OPERAND_SMALL_CONSTANT);
+        assert(i.operands[2].value == 0);
+        assert(i.next_pc == 5);
+    }
+
+    /* The same fallback applies to V4+ read time/routine operands. */
+    {
+        const uint8_t b[] = {0xe4, 0x55, 0x20, 0x30, 0x04, 0x09};
+        ZMachineInstruction i = decode(b, sizeof(b), 5);
+        assert(i.opcode_number == 4);
+        assert(i.operand_count_actual == 4);
+        assert(i.operands[0].value == 0x20);
+        assert(i.operands[1].value == 0x30);
+        assert(i.operands[2].type == ZM_OPERAND_SMALL_CONSTANT);
+        assert(i.operands[2].value == 0);
+        assert(i.operands[3].type == ZM_OPERAND_SMALL_CONSTANT);
+        assert(i.operands[3].value == 0);
+        assert(i.next_pc == sizeof(b));
     }
 
     /* Missing payload bytes must produce a useful truncated-instruction error. */
