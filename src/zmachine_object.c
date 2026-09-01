@@ -349,15 +349,37 @@ int zmachine_object_find_property(const ZMachine *vm, uint16_t object, uint16_t 
     return TCL_OK;
 }
 
-/* Read a 1- or 2-byte property, or its default value when it is absent. */
+/*
+ * Read a 1- or 2-byte property, or its default value when it is absent.
+ *
+ * Object zero has no physical object-table entry, but several old Inform
+ * library releases probe properties on a null object. Treat null as an object
+ * with no locally-declared properties: a valid property number therefore reads
+ * the corresponding default-property word. This is a read-only compatibility
+ * rule; property zero, out-of-range properties, writes, attributes, names, and
+ * other invalid object operations remain strict.
+ */
 int zmachine_object_get_prop(const ZMachine *vm, uint16_t object, uint16_t property, uint16_t *value)
 {
     ZMachinePropertyInfo info;
     uint32_t def;
-    if (!vm || !value || property == 0U) return TCL_ERROR;
-    if (zmachine_object_find_property(vm, object, property, &info) != TCL_OK) return TCL_ERROR;
+    uint16_t max_property;
+
+    if (!vm || !value || property == 0U)
+        return TCL_ERROR;
+
+    max_property = (vm->version <= 3U) ? 31U : 63U;
+    if (property > max_property)
+        return TCL_ERROR;
+
+    if (object == 0U) {
+        def = (uint32_t)vm->object_table_addr + (uint32_t)(property - 1U) * 2U;
+        return read_u16(vm, def, value);
+    }
+
+    if (zmachine_object_find_property(vm, object, property, &info) != TCL_OK)
+        return TCL_ERROR;
     if (info.number == 0U) {
-        if (property > ((vm->version <= 3U) ? 31U : 63U)) return TCL_ERROR;
         def = (uint32_t)vm->object_table_addr + (uint32_t)(property - 1U) * 2U;
         return read_u16(vm, def, value);
     }
