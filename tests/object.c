@@ -133,6 +133,12 @@ int main(void)
         assert(zmachine_object_get_prop(&vm, 1U, 10U, &value) == TCL_OK && value == 0x1234U);
         assert(zmachine_object_get_prop(&vm, 1U, 5U, &value) == TCL_OK && value == 0x7EU);
         assert(zmachine_object_get_prop(&vm, 1U, 4U, &value) == TCL_OK && value == 0U);
+
+        /* Null get_prop is an old-Inform read-only probe: return the default. */
+        value = 0U;
+        assert(zmachine_object_get_prop(&vm, 0U, 5U, &value) == TCL_OK && value == 0xA55AU);
+        assert(zmachine_object_get_prop(&vm, 0U, 0U, &value) == TCL_ERROR);
+
         assert(zmachine_object_get_prop(&vm, 1U, 5U, &value) == TCL_OK);
         assert(zmachine_object_put_prop(&vm, 1U, 10U, 0xBEEFU) == TCL_OK);
         assert(zmachine_object_get_prop(&vm, 1U, 10U, &value) == TCL_OK && value == 0xBEEFU);
