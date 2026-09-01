@@ -7,6 +7,7 @@ Primary specification references:
 - [Z-machine Standard 1.1 preface](https://inform-fiction.org/zmachine/standards/z1point1/preface.html)
 - [Section 8: screen model](https://inform-fiction.org/zmachine/standards/z1point1/sect08.html)
 - [Section 11: header](https://inform-fiction.org/zmachine/standards/z1point1/sect11.html)
+- [Section 12: object table](https://inform-fiction.org/zmachine/standards/z1point1/sect12.html)
 - [Section 15: opcode details](https://inform-fiction.org/zmachine/standards/z1point1/sect15.html)
 
 The companion [`OPCODE_STATUS.md`](OPCODE_STATUS.md) inventories every named opcode applicable to the supported story versions. It currently finds no missing named opcode in V1-V5/V7/V8. That is an implementation-completeness statement, **not** a formal Standards-revision claim.
@@ -59,6 +60,18 @@ The Standard says a revision number should be advertised only when the interpret
 4. **Audio presentation.** Sampled/background sound is intentionally unavailable and not advertised. Bleep requests are consumed safely rather than introducing a terminal/audio dependency into the VM core.
 
 These are scope decisions, not missing opcode implementations. Claiming Standard 1.0 or 1.1 in the header would therefore overstate what the text-only runtime promises.
+
+## Historical story compatibility exceptions
+
+The compatibility layer also contains a small number of deliberate exceptions for shipped historical story files. These are kept narrow and regression-tested rather than weakening general validation.
+
+- **Null object tree queries.** Section 12 defines object number 0 as "nothing" and says there is formally no such object. Old Inform libraries nevertheless contained known bugs which could issue object opcodes with a zero object reference; Inform patch L60701 documents these "zero errors" through Library 6/7. For compatibility, read-only `get_parent`, `get_sibling`, and `get_child` queries of object 0 produce the ordinary null result 0. The branching sibling/child forms therefore take their false branch. Mutating object operations remain strict.
+- **Null property-address probes.** Old Inform code can issue `get_prop_addr` with object 0 or property 0. Since the opcode's normal "property absent" result is 0, `tclzmachine` returns 0 for those probes without relaxing `get_prop`, `put_prop`, attribute operations, or property iteration generally.
+- **`get_prop_len 0`.** This is not merely a project compatibility choice: the Standard explicitly requires `get_prop_len 0` to return 0 because Infocom games and files produced by old Inform versions depend on it.
+- **Galatea zero-operand `read_char`.** The released `Galatea.z8` contains a historical zero-operand `read_char`. The decoder normalizes that malformed encoding to the Standard-equivalent default keyboard-device form `read_char 1` without consuming an extra byte, preserving the following store-variable address. Normal one-to-three-operand validation, device validation, and the project's no-timed-input policy remain in force for other encodings.
+- **Wishbringer `show_status`.** The Standard itself recommends treating later-version `show_status` as a no-op because a released V5 Wishbringer contains the opcode accidentally. The preflight therefore rejects it before V3 but consumes V3 and later as the documented compatibility behavior.
+
+These exceptions improve compatibility with historical files but do not change the formal-revision decision above. Undefined behavior elsewhere remains an error unless the Standard or a specific shipped-story compatibility case justifies a narrower rule.
 
 ## Release wording
 
