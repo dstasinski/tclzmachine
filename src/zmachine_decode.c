@@ -291,6 +291,44 @@ int zmachine_decode_instruction(const uint8_t *memory,
         instruction->operand_count_actual = 1U;
     }
 
+    /*
+     * Compatibility fallback for stories which request timed input even though
+     * this interpreter correctly advertises that timed keyboard input is not
+     * available (Flags 1 bit 7 is clear).
+     *
+     * Older Inform-era stories sometimes issue timed read/read_char forms
+     * without honoring that capability bit.  Aborting makes those otherwise
+     * playable stories unusable.  Preserve the encoded operand count and byte
+     * length, but normalize the optional time/routine operands to literal zero.
+     * Downstream preflight and every input execution path therefore see an
+     * ordinary untimed request, while next_pc remains at the exact encoded end
+     * of the instruction.  Because the feature is explicitly unavailable, the
+     * ignored timer/callback operands have no supported semantic side effects.
+     */
+    if (version >= 4U &&
+        instruction->form == ZM_FORM_VARIABLE &&
+        instruction->operand_count == ZM_OPERANDS_VAR) {
+        if (instruction->opcode_number == 4U) { /* read text parse [time routine] */
+            if (instruction->operand_count_actual >= 3U) {
+                instruction->operands[2].type = ZM_OPERAND_SMALL_CONSTANT;
+                instruction->operands[2].value = 0U;
+            }
+            if (instruction->operand_count_actual >= 4U) {
+                instruction->operands[3].type = ZM_OPERAND_SMALL_CONSTANT;
+                instruction->operands[3].value = 0U;
+            }
+        } else if (instruction->opcode_number == 22U) { /* read_char 1 [time routine] */
+            if (instruction->operand_count_actual >= 2U) {
+                instruction->operands[1].type = ZM_OPERAND_SMALL_CONSTANT;
+                instruction->operands[1].value = 0U;
+            }
+            if (instruction->operand_count_actual >= 3U) {
+                instruction->operands[2].type = ZM_OPERAND_SMALL_CONSTANT;
+                instruction->operands[2].value = 0U;
+            }
+        }
+    }
+
     /* Opcode-specific trailing data begins at next_pc. */
     instruction->next_pc = pc;
     return 1;
