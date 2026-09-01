@@ -30,6 +30,8 @@
 #define ZM_INTERPRETER_VERSION ((uint8_t)'T')
 #define ZM_SCREEN_HEIGHT_LINES 255U    /* Infinite scrolling text surface. */
 #define ZM_SCREEN_WIDTH_CHARS 80U
+#define ZM_TRUE_BLACK 0x0000U
+#define ZM_TRUE_WHITE 0x7fffU
 
 /* Write a big-endian word to a header location already known to be in range. */
 static void write_be16(uint8_t *memory, size_t address, uint16_t value)
@@ -38,16 +40,37 @@ static void write_be16(uint8_t *memory, size_t address, uint16_t value)
     memory[address + 1U] = (uint8_t)value;
 }
 
+/* Return nonzero when one header-extension word may legally be rewritten. */
+static int extension_word_writable(const ZMachine *vm,
+                                   size_t extension,
+                                   uint16_t words,
+                                   uint16_t word)
+{
+    size_t address;
+
+    if (!vm || !vm->memory || word == 0U || word > words)
+        return 0;
+
+    address = extension + 2U * (size_t)word;
+    return address + 1U < vm->memory_size &&
+           address + 1U < (size_t)vm->static_memory_addr;
+}
+
 /*
- * Clear unsupported header-extension Flags 3 when the table is writable.
+ * Refresh interpreter-owned fields in the optional V5+ header extension.
  *
- * Standard 1.1 currently defines bit 0 as a request for transparency, a V6
- * presentation feature which this runtime cannot provide. Unused bits must also
- * be zeroed by the interpreter. The extension normally resides in dynamic
- * memory; if a malformed story points it into static memory, leave it untouched
- * rather than violating the VM's immutable-story boundary.
+ * Standard 1.1 defines word 4 as Flags 3. Its only currently allocated bit is
+ * the V6 transparency request, which this runtime cannot provide; every unused
+ * bit must also be cleared. Words 5 and 6 are the interpreter-reset true default
+ * foreground/background colours. They mirror this runtime's deterministic white
+ * on black defaults using the Standard's recommended 15-bit colour values.
+ *
+ * Header extensions are explicitly length-delimited. A short extension is legal:
+ * an interpreter write beyond its declared word count must simply do nothing.
+ * Each word is therefore checked independently, and malformed extensions pointing
+ * into static memory are left untouched rather than violating story immutability.
  */
-static void refresh_flags3(ZMachine *vm)
+static void refresh_header_extension(ZMachine *vm)
 {
     size_t extension;
     uint16_t words;
@@ -61,16 +84,15 @@ static void refresh_flags3(ZMachine *vm)
 
     words = (uint16_t)(((uint16_t)vm->memory[extension] << 8) |
                        vm->memory[extension + 1U]);
-    if (words < 4U)
-        return;
 
-    /* Word 4 occupies extension+8..+9. */
-    if (extension + 9U >= vm->memory_size ||
-        extension + 9U >= (size_t)vm->static_memory_addr)
-        return;
+    if (extension_word_writable(vm, extension, words, 4U))
+        write_be16(vm->memory, extension + 8U, 0U); /* Flags 3 */
 
-    vm->memory[extension + 8U] = 0U;
-    vm->memory[extension + 9U] = 0U;
+    if (extension_word_writable(vm, extension, words, 5U))
+        write_be16(vm->memory, extension + 10U, ZM_TRUE_WHITE);
+
+    if (extension_word_writable(vm, extension, words, 6U))
+        write_be16(vm->memory, extension + 12U, ZM_TRUE_BLACK);
 }
 
 void zmachine_refresh_interpreter_header(ZMachine *vm)
@@ -169,5 +191,5 @@ void zmachine_refresh_interpreter_header(ZMachine *vm)
     vm->memory[0x32U] = 0U;
     vm->memory[0x33U] = 0U;
 
-    refresh_flags3(vm);
+    refresh_header_extension(vm);
 }
