@@ -39,7 +39,7 @@ The interpreter header is intentionally conservative. A story should never be to
 | V4+ bold | Flags 1 bit 2 set only in mIRC format | mIRC `0x02` presentation; plain format does not advertise it |
 | V4+ italic | Flags 1 bit 3 set only in mIRC format | mIRC italic presentation; plain format does not advertise it |
 | V4+ fixed-space style | Flags 1 bit 4 clear | Semantic request is accepted but cannot force the user's IRC/Tcl client font |
-| V4+ timed input | Flags 1 bit 7 clear | Nonzero timed `read`/`read_char` requests are rejected |
+| V4+ timed input | Flags 1 bit 7 clear | Timers/callbacks are unavailable; legacy timed `read`/`read_char` forms degrade to ordinary untimed input |
 | V5+ colours | Flags 1 bit 0 set only in mIRC format | Standard colours and true-colour requests map to mIRC presentation |
 | Pictures / character graphics | Request bit cleared where interpreter-owned | Not provided |
 | Mouse | Flags 2 request bit cleared | Not provided |
@@ -66,12 +66,19 @@ These are scope decisions, not missing opcode implementations. Claiming Standard
 The compatibility layer also contains a small number of deliberate exceptions for shipped historical story files. These are kept narrow and regression-tested rather than weakening general validation.
 
 - **Null object tree queries.** Section 12 defines object number 0 as "nothing" and says there is formally no such object. Old Inform libraries nevertheless contained known bugs which could issue object opcodes with a zero object reference; Inform patch L60701 documents these "zero errors" through Library 6/7. For compatibility, read-only `get_parent`, `get_sibling`, and `get_child` queries of object 0 produce the ordinary null result 0. The branching sibling/child forms therefore take their false branch. Mutating object operations remain strict.
-- **Null property-address probes.** Old Inform code can issue `get_prop_addr` with object 0 or property 0. Since the opcode's normal "property absent" result is 0, `tclzmachine` returns 0 for those probes without relaxing `get_prop`, `put_prop`, attribute operations, or property iteration generally.
+- **Null property probes.** Old Inform code can issue `get_prop_addr` and `get_prop` with object 0. `get_prop_addr` returns the normal "property absent" value 0. A valid `get_prop` on object 0 behaves as if the null object has no local property and therefore returns the corresponding default-property word. Property 0, property writes, attributes, names, and property iteration remain strict.
 - **`get_prop_len 0`.** This is not merely a project compatibility choice: the Standard explicitly requires `get_prop_len 0` to return 0 because Infocom games and files produced by old Inform versions depend on it.
-- **Galatea zero-operand `read_char`.** The released `Galatea.z8` contains a historical zero-operand `read_char`. The decoder normalizes that malformed encoding to the Standard-equivalent default keyboard-device form `read_char 1` without consuming an extra byte, preserving the following store-variable address. Normal one-to-three-operand validation, device validation, and the project's no-timed-input policy remain in force for other encodings.
+- **Galatea zero-operand `read_char`.** The released `Galatea.z8` contains a historical zero-operand `read_char`. The decoder normalizes that malformed encoding to the Standard-equivalent default keyboard-device form `read_char 1` without consuming an extra byte, preserving the following store-variable address.
+- **Unavailable timed input.** Flags 1 bit 7 remains clear, so stories are correctly told that timed keyboard input is unavailable. Some older Inform-era stories nevertheless issue nonzero timed `read`/`read_char` forms. Those forms are normalized to ordinary untimed input; the timer routine is not called. This is a compatibility fallback, not an advertised implementation of timed input.
+- **Legacy ZSCII TAB.** Output ZSCII 9 is formally associated with V6. Some V5 stories emit it anyway. The text-only runtime reduces it to one ordinary space, including when memory output stream 3 is active, rather than exposing a control character to Tcl/IRC output.
+- **16-bit direct array arithmetic.** For `loadw`, `loadb`, `storew`, and `storeb`, the final `base + index` address is kept in the Z-machine's 16-bit value domain. This matches long-standing deployed-interpreter behavior and Praxix-style conformance expectations for overflowing/negative-looking indexes; memory bounds and dynamic-memory write checks still apply after the wrap.
 - **Wishbringer `show_status`.** The Standard itself recommends treating later-version `show_status` as a no-op because a released V5 Wishbringer contains the opcode accidentally. The preflight therefore rejects it before V3 but consumes V3 and later as the documented compatibility behavior.
 
 These exceptions improve compatibility with historical files but do not change the formal-revision decision above. Undefined behavior elsewhere remains an error unless the Standard or a specific shipped-story compatibility case justifies a narrower rule.
+
+## Catalog interpretation
+
+`tests/probe_catalog.tcl` is intended for mixed local interactive-fiction collections. It recognizes a Z-machine story by the first-byte version field before creating a VM. Files with a header version outside 1-8 are reported as `SKIP` rather than VM failures, because collections commonly contain unrelated `.dat` resources beside genuine Infocom `.dat` stories. Version 6 files are also `SKIP` because V6 is an intentional project scope exclusion. No third-party story bytes are committed by this probe.
 
 ## Release wording
 
