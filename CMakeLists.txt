@@ -39,8 +39,8 @@ set(TCLZMACHINE_VM_SOURCES
 
 #
 # Instruction execution is layered so each module owns one concern:
-#   zmachine_preflight.c  public step boundary; rejects version/arity errors
-#                        before any layer can resolve a variable operand
+#   zmachine_preflight.c  authoritative decoded-instruction version/arity/literal
+#                        validation, shared by public step and cooperative run
 #   zmachine_stream.c     external replay, transcript, and command-record files
 #   zmachine_mirc.c       optional text style/colour state and mIRC rendering
 #   zmachine_file_aux.c   V5+ auxiliary byte-region save/restore requests
@@ -48,7 +48,7 @@ set(TCLZMACHINE_VM_SOURCES
 #   zmachine_tokenise.c   non-blocking lexical analysis opcodes
 #   zmachine_key.c        exact numeric ZSCII input for read_char
 #   zmachine_dispatch.c   remaining text-only compatibility wrapper
-#   zmachine_core_extra.c pure control/arithmetic completeness opcodes
+#   zmachine_core_extra.c pure control/arithmetic completeness semantics
 #   zmachine_exec.c       original ordinary core opcode executor
 # The lower implementations are renamed at compile time so each wrapper can
 # delegate downward without duplicating public APIs or mixing host policy into
@@ -68,15 +68,17 @@ set_source_files_properties(src/zmachine_file_aux.c PROPERTIES
 )
 
 #
-# The form-aware cooperative loop lives in zmachine_run.c. The external stream
-# wrapper still owns replay accumulation and host FILE lifetimes, while the mIRC
-# layer wraps its public run/lifetime hooks so presentation output is cleared once
-# per Tcl command and story-controlled style state is reset on load/restart/reset.
-# The stream step entry point is renamed beneath zmachine_preflight.c so every
-# execution path receives version/arity checks before stream or presentation
-# policy can resolve operands. Canonical output remains in zmachine.c; its private
-# append implementation is mirrored by zmachine_mirc.c before returning through
-# the transcript wrapper.
+# The form-aware cooperative loop lives in zmachine_run.c and calls the same
+# decoded-instruction preflight as public step dispatch before it handles any
+# opcode which may suspend. The external stream wrapper still owns replay
+# accumulation and host FILE lifetimes, while the mIRC layer wraps its public
+# run/lifetime hooks so presentation output is cleared once per Tcl command and
+# story-controlled style state is reset on load/restart/reset. The stream step
+# entry point is renamed beneath zmachine_preflight.c so ordinary step execution
+# also receives the shared legality check before stream or presentation policy can
+# resolve operands. Canonical output remains in zmachine.c; its private append
+# implementation is mirrored by zmachine_mirc.c before returning through the
+# transcript wrapper.
 #
 set_source_files_properties(src/zmachine_run.c PROPERTIES
     COMPILE_DEFINITIONS "zmachine_run=zmachine_run_stream_base"
@@ -198,6 +200,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_include_directories(arity-side-effects-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(arity-side-effects-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME arity-side-effects COMMAND arity-side-effects-test)
+
+    add_executable(preflight-authority-test tests/preflight_authority.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(preflight-authority-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(preflight-authority-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME preflight-authority COMMAND preflight-authority-test)
 
     add_executable(mirc-presentation-test tests/mirc_presentation.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(mirc-presentation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
