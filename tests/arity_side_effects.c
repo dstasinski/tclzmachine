@@ -4,10 +4,11 @@
  * Regression coverage for global pre-resolution opcode validation.
  *
  * A VARIABLE operand naming variable 0 pops the evaluation stack. Malformed
- * but decodable Z-code must therefore be rejected for impossible operand count
- * or an already-invalid literal selector before any ownership layer evaluates
- * another operand. These cases deliberately exercise multiple dispatcher layers
- * through the public zmachine_step() boundary with a stack sentinel.
+ * but decodable Z-code must therefore be rejected for impossible operand count,
+ * undefined opcode number, or an already-invalid literal selector before any
+ * ownership layer evaluates another operand. These cases deliberately exercise
+ * multiple dispatcher layers through the public zmachine_step() boundary with a
+ * stack sentinel.
  */
 
 #include "tclzmachine.h"
@@ -95,6 +96,28 @@ static void expect_ignored_ext29_keeps_stack(uint8_t version, uint16_t sentinel)
 
 int main(void)
 {
+    /* Undefined 2OP:0 must fail before resolving either variable operand. */
+    {
+        static const uint8_t code[] = {
+            0xC0U, 0xAFU, /* variable-form 2OP:0; variable, variable */
+            0x00U, 0x01U
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "undefined Z-machine 2OP opcode",
+                               0xB001U);
+    }
+
+    /* Undefined 2OP:29-31 slots receive the same pre-resolution rejection. */
+    {
+        static const uint8_t code[] = {
+            0xDDU, 0xAFU, /* variable-form 2OP:29; variable, variable */
+            0x00U, 0x01U
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "undefined Z-machine 2OP opcode",
+                               0xB029U);
+    }
+
     {
         static const uint8_t code[] = {0xF4U, 0x9FU, 0x00U, 0x01U};
         expect_preflight_error(5U, code, sizeof(code),
