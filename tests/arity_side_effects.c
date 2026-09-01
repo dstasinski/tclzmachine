@@ -3,11 +3,11 @@
  *
  * Regression coverage for global pre-resolution opcode validation.
  *
- * A VARIABLE operand naming variable 0 pops the evaluation stack.  Malformed
+ * A VARIABLE operand naming variable 0 pops the evaluation stack. Malformed
  * but decodable Z-code must therefore be rejected for impossible operand count
- * before any ownership layer evaluates that operand.  These cases deliberately
- * exercise the stream, lexical, presentation, and pure-core layers through the
- * public zmachine_step() boundary with a sentinel on the evaluation stack.
+ * or an already-invalid literal selector before any ownership layer evaluates
+ * another operand. These cases deliberately exercise multiple dispatcher layers
+ * through the public zmachine_step() boundary with a stack sentinel.
  */
 
 #include "tclzmachine.h"
@@ -65,25 +65,25 @@ static void expect_preflight_error(uint8_t version,
     free_vm(&vm);
 }
 
-static void expect_v5_ignored_ext29_keeps_stack(void)
+static void expect_ignored_ext29_keeps_stack(uint8_t version, uint16_t sentinel)
 {
     ZMachine vm;
     static const uint8_t code[] = {
-        0xBEU, 0x1DU, /* EXT:29 -- undefined in V5 and therefore ignored */
+        0xBEU, 0x1DU, /* EXT:29 -- buffer_screen exists only in V6 */
         0x9FU,       /* variable, small constant, then omitted */
         0x00U,       /* variable 0: must not pop */
         0x01U
     };
 
-    init_vm(&vm, 5U);
+    init_vm(&vm, version);
     memcpy(vm.memory + 0x20U, code, sizeof(code));
     vm.pc = 0x20U;
-    assert(zmachine_stack_push(&vm, 0xBEEFU) == TCL_OK);
+    assert(zmachine_stack_push(&vm, sentinel) == TCL_OK);
 
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.state == ZM_STATE_READY);
     assert(vm.sp == 1U);
-    assert(vm.stack[0] == 0xBEEFU);
+    assert(vm.stack[0] == sentinel);
     assert(vm.pc == 0x20U + sizeof(code));
 
     free_vm(&vm);
@@ -111,7 +111,29 @@ int main(void)
                                0xB202U);
     }
 
-    /* The outer guard also catches version-illegal stream opcodes before pop. */
+    /* Invalid literal stream numbers fail before a later variable-0 table pops. */
+    {
+        static const uint8_t code[] = {
+            0xF3U, 0x6FU, /* small constant, variable, omitted, omitted */
+            0x05U,       /* invalid stream 5 */
+            0x00U        /* variable 0: must not pop */
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "unsupported Z-machine output stream number",
+                               0xB212U);
+    }
+
+    /* Selecting stream 3 without its table is a value-dependent shape error. */
+    {
+        static const uint8_t code[] = {
+            0xF3U, 0x7FU, 0x03U
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "output_stream 3 requires a table operand",
+                               0xB222U);
+    }
+
+    /* The outer guard catches version-illegal stream opcodes before pop. */
     {
         static const uint8_t code[] = {
             0xF3U, 0xBFU, 0x00U
@@ -119,6 +141,26 @@ int main(void)
         expect_preflight_error(2U, code, sizeof(code),
                                "VAR opcode requires V3 or later",
                                0xB303U);
+    }
+
+    /* V1-V3 read has exactly text and parse operands. */
+    {
+        static const uint8_t code[] = {
+            0xE4U, 0xBFU, 0x00U
+        };
+        expect_preflight_error(3U, code, sizeof(code),
+                               "V1-V3 read requires exactly two operands",
+                               0xB313U);
+    }
+
+    /* V4 read requires text+parse, with only the timed pair optional. */
+    {
+        static const uint8_t code[] = {
+            0xE4U, 0xBFU, 0x00U
+        };
+        expect_preflight_error(4U, code, sizeof(code),
+                               "V4 read requires two to four operands",
+                               0xB323U);
     }
 
     /* Lexical layer: tokenise requires text and parse destinations. */
@@ -129,6 +171,18 @@ int main(void)
         expect_preflight_error(5U, code, sizeof(code),
                                "tokenise requires two to four operands",
                                0xB404U);
+    }
+
+    /* A literal zero tokenise parse buffer fails before text variable 0 pops. */
+    {
+        static const uint8_t code[] = {
+            0xFBU, 0x8FU, /* variable, large constant, then omitted */
+            0x00U,       /* text from variable 0 */
+            0x00U, 0x00U /* invalid parse address 0 */
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "nonzero parse buffer",
+                               0xB414U);
     }
 
     /* Lexical layer: encode_text has a fixed four-operand signature. */
@@ -151,6 +205,18 @@ int main(void)
                                0xB606U);
     }
 
+    /* Invalid literal input device fails before a later variable operand pops. */
+    {
+        static const uint8_t code[] = {
+            0xF6U, 0x6FU, /* small constant, variable */
+            0x02U,       /* only device 1 is legal */
+            0x00U
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "read_char input device must be 1",
+                               0xB616U);
+    }
+
     /* mIRC/presentation layer: set_text_style is exactly one operand. */
     {
         static const uint8_t code[] = {
@@ -171,6 +237,16 @@ int main(void)
                                0xB808U);
     }
 
+    /* V7/V8 follow the V5 screen model, so V6's third window operand is illegal. */
+    {
+        static const uint8_t code[] = {
+            0xDBU, 0x97U, 0x00U, 0x01U, 0x02U
+        };
+        expect_preflight_error(7U, code, sizeof(code),
+                               "2OP instruction requires exactly two operands",
+                               0xB818U);
+    }
+
     /* print_table requires an address and width before optional height/skip. */
     {
         static const uint8_t code[] = {
@@ -189,6 +265,18 @@ int main(void)
         expect_preflight_error(5U, code, sizeof(code),
                                "2OP instruction requires exactly two operands",
                                0xBA0AU);
+    }
+
+    /* An invalid literal colour fails before the other variable operand pops. */
+    {
+        static const uint8_t code[] = {
+            0xDBU, 0x6FU, /* small constant, variable */
+            0x0AU,       /* colour 10 is V6-only */
+            0x00U
+        };
+        expect_preflight_error(7U, code, sizeof(code),
+                               "unsupported set_colour foreground value",
+                               0xBA1AU);
     }
 
     /* Pure core: throw must not pop its value before noticing missing frame. */
@@ -227,6 +315,18 @@ int main(void)
                                0xBE0EU);
     }
 
+    /* Invalid literal shift count rejects before a number in variable 0 pops. */
+    {
+        static const uint8_t code[] = {
+            0xBEU, 0x02U, 0x8FU, /* variable, large constant */
+            0x00U,              /* number from variable 0 */
+            0x00U, 0x10U        /* invalid +16 places */
+        };
+        expect_preflight_error(5U, code, sizeof(code),
+                               "outside -15..15",
+                               0xBE1EU);
+    }
+
     /* mIRC/presentation layer: supported set_true_colour has two operands. */
     {
         static const uint8_t code[] = {
@@ -237,14 +337,16 @@ int main(void)
                                0xBF0FU);
     }
 
-    /* V7/V8 execute EXT:29 buffer_screen and therefore require one operand. */
+    /* V6-only true-colour -3 cannot pop the later variable background in V7. */
     {
         static const uint8_t code[] = {
-            0xBEU, 0x1DU, 0x9FU, 0x00U, 0x01U
+            0xBEU, 0x0DU, 0x8FU, /* large constant, variable */
+            0xFFU, 0xFDU,       /* -3: V6-only colour-under-cursor */
+            0x00U
         };
         expect_preflight_error(7U, code, sizeof(code),
-                               "buffer_screen requires exactly one operand",
-                               0xC010U);
+                               "unsupported set_true_colour foreground value",
+                               0xBF1FU);
     }
 
     /* Auxiliary EXT save/restore cannot have a partial two-operand signature. */
@@ -257,9 +359,11 @@ int main(void)
                                0xC111U);
     }
 
-    /* Preserve the Standard's V5 EXT:29 ignore exception despite odd arity. */
-    expect_v5_ignored_ext29_keeps_stack();
+    /* EXT:29 is undefined in every supported non-V6 screen model and is ignored. */
+    expect_ignored_ext29_keeps_stack(5U, 0xC515U);
+    expect_ignored_ext29_keeps_stack(7U, 0xC717U);
+    expect_ignored_ext29_keeps_stack(8U, 0xC818U);
 
-    puts("global opcode arity preflight side-effect tests passed");
+    puts("global opcode arity/value preflight side-effect tests passed");
     return 0;
 }
