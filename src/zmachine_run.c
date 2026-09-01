@@ -16,11 +16,10 @@
  * zmachine_preflight_instruction() routine used by zmachine_step() before any
  * run-layer operand is resolved or any host wait is entered.
  *
- * The original run-loop implementation remains in zmachine.c under the renamed
- * symbol zmachine_run_legacy for now; story loading, lifetime management, and
- * output buffering still live there. This module is the public run path and is
- * intentionally written so the legacy loop can be removed in a later cleanup
- * without changing VM behavior.
+ * This is the sole cooperative execution loop. Story loading, session lifetime,
+ * packed-address helpers, and canonical output buffering live in zmachine.c;
+ * opcode behavior is never duplicated there. Keeping one authoritative run path
+ * prevents compatibility fixes and operand-side-effect rules from diverging.
  */
 
 #include "tclzmachine.h"
