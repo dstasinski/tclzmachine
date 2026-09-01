@@ -925,18 +925,36 @@ void zmachine_destroy(ZMachine *vm)
     zmachine_destroy_stream_base(vm);
 }
 
+/*
+ * Loading a new story closes every host stream. Flags 2 bit 0 must therefore be
+ * forced off after the lower loader normalizes the new story header; a story-file
+ * image is not allowed to make the transcript bit claim that a nonexistent host
+ * transcript is already active.
+ */
 int zmachine_load_story(ZMachine *vm, const char *path)
 {
     int rc;
+
     close_stream_io(vm);
     rc = zmachine_load_story_stream_base(vm, path);
+    if (rc == TCL_OK)
+        select_stream2(vm, 0);
     return rc;
 }
 
+/*
+ * API reset deliberately closes host replay/transcript/record files. Keep the
+ * dynamic Flags 2 transcript bit synchronized with that reset policy. This is
+ * distinct from the Z-machine restart opcode, whose dedicated path preserves the
+ * live transcript selection and open transcript resource as required.
+ */
 int zmachine_reset(ZMachine *vm)
 {
     int rc = zmachine_reset_stream_base(vm);
-    if (rc == TCL_OK)
+
+    if (rc == TCL_OK) {
         close_stream_io(vm);
+        select_stream2(vm, 0);
+    }
     return rc;
 }
