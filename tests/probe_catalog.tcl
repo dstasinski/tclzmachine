@@ -42,6 +42,28 @@ if {[catch {package require tclzmachine} err]} {
     exit 1
 }
 
+# Read the first story byte, which is always the Z-machine version number.
+# Collections often contain unrelated *.dat resource files alongside genuine
+# Infocom *.dat stories, so extension alone is not enough to classify a file.
+# Return -1 only when the file itself cannot be read.
+proc story_header_version {story} {
+    if {[catch {
+        set channel [open $story rb]
+        fconfigure $channel -translation binary -encoding binary
+        set data [read $channel 1]
+        close $channel
+    }]} {
+        catch {close $channel}
+        return -1
+    }
+
+    if {[string length $data] != 1} {
+        return -1
+    }
+    binary scan $data c byte
+    return [expr {$byte & 0xff}]
+}
+
 # Return a compact hexadecimal window around a failing story PC. The marker
 # >xx< identifies the byte at the reported PC. This intentionally reads only a
 # few bytes from the local story and never copies story material into fixtures.
@@ -114,19 +136,37 @@ foreach story $stories {
     incr index
     set session "catalog_$index"
     set name [file tail $story]
+    set headerVersion [story_header_version $story]
 
-    # Creating the session validates the Z-machine version/header before any
-    # bytecode executes. Version 6 is an intentional unsupported case rather
-    # than a compatibility regression, so report it separately as SKIP.
+    # A Z-machine story's first byte must be a defined story version. This keeps
+    # unrelated .dat resources in mixed IF collections from being reported as VM
+    # compatibility failures. Version 6 is a genuine Z story but intentionally
+    # outside this text-only runtime's supported set.
+    if {$headerVersion < 0} {
+        incr failed
+        set detail "unable to read Z-machine header version byte"
+        puts [format "FAIL  %-32s %s" $name $detail]
+        lappend failures [list $name $detail]
+        continue
+    }
+    if {$headerVersion < 1 || $headerVersion > 8} {
+        incr skipped
+        puts [format "SKIP  %-32s not a Z-machine story (header version byte %d)" \
+                  $name $headerVersion]
+        continue
+    }
+    if {$headerVersion == 6} {
+        incr skipped
+        puts [format "SKIP  %-32s Z-machine Version 6 is intentionally unsupported by this text-only runtime" \
+                  $name]
+        continue
+    }
+
+    # Creating the session performs the remaining Z-machine header validation.
     if {[catch {zmachine::create $session $story} err]} {
-        if {[string match {*Version 6*intentionally unsupported*} $err]} {
-            incr skipped
-            puts [format "SKIP  %-32s %s" $name $err]
-        } else {
-            incr failed
-            puts [format "FAIL  %-32s create: %s" $name $err]
-            lappend failures [list $name "create: $err"]
-        }
+        incr failed
+        puts [format "FAIL  %-32s create: %s" $name $err]
+        lappend failures [list $name "create: $err"]
         continue
     }
 
@@ -198,5 +238,5 @@ if {[llength $failures] > 0} {
 }
 
 # A nonzero exit makes this useful in ad-hoc compatibility scripts while still
-# treating intentionally unsupported V6 stories as skips rather than failures.
+# treating intentionally unsupported/non-Z catalog entries as skips.
 exit [expr {$failed == 0 ? 0 : 1}]
