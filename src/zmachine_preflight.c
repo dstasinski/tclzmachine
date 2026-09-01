@@ -99,31 +99,30 @@ static int validate_version(ZMachine *vm,
 
     if (instruction->operand_count == ZM_OPERANDS_0OP) {
         switch (opcode) {
-        case 5U: /* save: old 0OP form becomes illegal at V5 */
-        case 6U: /* restore */
+        case 5U:
+        case 6U:
             if (vm->version >= 5U)
                 return preflight_error(vm,
                     "0OP save/restore is illegal in Version 5 and later");
             break;
 
-        case 12U: /* show_status: V3, compatibility no-op in later versions */
+        case 12U:
             if (vm->version < 3U)
                 return preflight_error(vm,
                                        "show_status is unavailable before Version 3");
             break;
 
-        case 13U: /* verify */
+        case 13U:
             if (vm->version < 3U)
                 return preflight_error(vm,
                                        "verify is unavailable before Version 3");
             break;
 
         case 14U:
-            /* In V5+ byte 0xBE is decoded as the EXT prefix, not as 0OP:14. */
             return preflight_error(vm,
                                    "extended opcode prefix is illegal before Version 5");
 
-        case 15U: /* piracy */
+        case 15U:
             if (vm->version < 5U)
                 return preflight_error(vm,
                                        "piracy is unavailable before Version 5");
@@ -136,13 +135,6 @@ static int validate_version(ZMachine *vm,
     }
 
     if (instruction->operand_count == ZM_OPERANDS_2OP) {
-        /*
-         * The Standard defines 2OP:1 through 2OP:28 only. Opcode 0 and slots
-         * 29..31 are not instructions in any supported version. Reject them at
-         * the encoded-legality boundary so a VARIABLE operand (especially
-         * variable 0) cannot be evaluated before the VM discovers that the
-         * opcode number itself is undefined.
-         */
         if (opcode == 0U || opcode >= 29U)
             return preflight_error(vm, "undefined Z-machine 2OP opcode");
         if (opcode == 25U && vm->version < 4U)
@@ -163,36 +155,36 @@ static int validate_version(ZMachine *vm,
         return TCL_OK;
 
     switch (opcode) {
-    case 10U: /* split_window */
-    case 11U: /* set_window */
-    case 19U: /* output_stream */
-    case 20U: /* input_stream */
-    case 21U: /* sound_effect: historical V3 compatibility */
+    case 10U:
+    case 11U:
+    case 19U:
+    case 20U:
+    case 21U:
         if (vm->version < 3U)
             return preflight_error(vm, "VAR opcode requires V3 or later");
         break;
 
-    case 12U: /* call_vs2 */
-    case 13U: /* erase_window */
-    case 14U: /* erase_line */
-    case 15U: /* set_cursor */
-    case 16U: /* get_cursor */
-    case 17U: /* set_text_style */
-    case 18U: /* buffer_mode */
-    case 22U: /* read_char */
-    case 23U: /* scan_table */
+    case 12U:
+    case 13U:
+    case 14U:
+    case 15U:
+    case 16U:
+    case 17U:
+    case 18U:
+    case 22U:
+    case 23U:
         if (vm->version < 4U)
             return preflight_error(vm, "VAR opcode requires V4 or later");
         break;
 
-    case 24U: /* not */
-    case 25U: /* call_vn */
-    case 26U: /* call_vn2 */
-    case 27U: /* tokenise */
-    case 28U: /* encode_text */
-    case 29U: /* copy_table */
-    case 30U: /* print_table */
-    case 31U: /* check_arg_count */
+    case 24U:
+    case 25U:
+    case 26U:
+    case 27U:
+    case 28U:
+    case 29U:
+    case 30U:
+    case 31U:
         if (vm->version < 5U)
             return preflight_error(vm, "VAR opcode requires V5 or later");
         break;
@@ -226,7 +218,6 @@ static int require_range(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Validate operand counts which are decidable without evaluating operands. */
 static int validate_arity(ZMachine *vm,
                           const ZMachineInstruction *instruction)
 {
@@ -248,47 +239,39 @@ static int validate_arity(ZMachine *vm,
 
     if (instruction->form == ZM_FORM_EXTENDED) {
         switch (opcode) {
-        case 0U: /* save: zero-operand full save or 3/4-operand auxiliary form */
-        case 1U: /* restore */
+        case 0U:
+        case 1U:
             if (instruction->operand_count_actual != 0U &&
                 instruction->operand_count_actual != 3U &&
                 instruction->operand_count_actual != 4U)
                 return preflight_error(vm,
                     "extended save/restore requires zero, three, or four operands");
             break;
-
-        case 2U: /* log_shift */
-        case 3U: /* art_shift */
+        case 2U:
+        case 3U:
             return require_exact(vm, instruction, 2U,
                                  "shift opcode requires exactly two operands");
-
-        case 4U: /* set_font -- V6 window form is not a V7/V8 form */
+        case 4U:
             return require_exact(vm, instruction, 1U,
                                  "set_font requires exactly one operand");
-
-        case 9U: /* save_undo */
-        case 10U: /* restore_undo */
+        case 9U:
+        case 10U:
             return require_exact(vm, instruction, 0U,
                                  "undo opcode does not accept operands");
-
-        case 11U: /* print_unicode */
+        case 11U:
             return require_exact(vm, instruction, 1U,
                                  "print_unicode requires exactly one operand");
-
-        case 12U: /* check_unicode */
+        case 12U:
             return require_exact(vm, instruction, 1U,
                                  "check_unicode requires exactly one operand");
-
-        case 13U: /* set_true_colour -- optional window exists only in V6 */
+        case 13U:
             return require_exact(vm, instruction, 2U,
                                  "set_true_colour requires exactly two operands");
-
-        case 29U: /* real buffer_screen exists only in V6; otherwise ignored */
+        case 29U:
             if (vm->version == 6U)
                 return require_exact(vm, instruction, 1U,
                                      "buffer_screen requires exactly one operand");
             break;
-
         default:
             break;
         }
@@ -300,142 +283,110 @@ static int validate_arity(ZMachine *vm,
         return TCL_OK;
 
     switch (opcode) {
-    case 0U: /* call/call_vs */
+    case 0U:
         return require_range(vm, instruction, 1U, 4U,
                              "call_vs requires one to four operands");
-
-    case 1U: /* storew */
-    case 2U: /* storeb */
-    case 3U: /* put_prop */
+    case 1U:
+    case 2U:
+    case 3U:
         return require_exact(vm, instruction, 3U,
                              "three-operand VAR instruction has invalid arity");
-
-    case 4U: /* read/sread/aread */
+    case 4U:
         if (vm->version <= 3U)
             return require_exact(vm, instruction, 2U,
                                  "V1-V3 read requires exactly two operands");
         if (vm->version == 4U)
             return require_range(vm, instruction, 2U, 4U,
                                  "V4 read requires two to four operands");
-        /*
-         * Standard V5 syntax names both text and parse. Preserve the project's
-         * established Infocom-compatibility path which treats an omitted parse
-         * operand as an explicit zero parse buffer; timed operands remain optional.
-         */
         return require_range(vm, instruction, 1U, 4U,
                              "V5-compatible read requires one to four operands");
-
-    case 5U: /* print_char */
-    case 6U: /* print_num */
-    case 8U: /* push */
-    case 9U: /* pull: V6 user-stack form is not used by V7/V8 */
+    case 5U:
+    case 6U:
+    case 8U:
+    case 9U:
         return require_exact(vm, instruction, 1U,
                              "single-operand VAR instruction has invalid arity");
-
-    case 7U: /* random */
+    case 7U:
         return require_exact(vm, instruction, 1U,
                              "random requires exactly one operand");
-
-    case 10U: /* split_window */
+    case 10U:
         return require_exact(vm, instruction, 1U,
                              "split_window requires exactly one operand");
-
-    case 11U: /* set_window */
+    case 11U:
         return require_exact(vm, instruction, 1U,
                              "set_window requires exactly one operand");
-
-    case 12U: /* call_vs2 */
+    case 12U:
         return require_range(vm, instruction, 1U, 8U,
                              "call_vs2 requires one to eight operands");
-
-    case 13U: /* erase_window */
+    case 13U:
         return require_exact(vm, instruction, 1U,
                              "erase_window requires exactly one operand");
-
-    case 14U: /* erase_line */
+    case 14U:
         return require_exact(vm, instruction, 1U,
                              "erase_line requires exactly one operand");
-
-    case 15U: /* set_cursor -- optional window exists only in V6 */
+    case 15U:
         return require_exact(vm, instruction, 2U,
                              "set_cursor requires exactly two operands");
-
-    case 16U: /* get_cursor */
+    case 16U:
         return require_exact(vm, instruction, 1U,
                              "get_cursor requires exactly one operand");
-
-    case 17U: /* set_text_style */
+    case 17U:
         return require_exact(vm, instruction, 1U,
                              "set_text_style requires exactly one operand");
-
-    case 18U: /* buffer_mode */
+    case 18U:
         return require_exact(vm, instruction, 1U,
                              "buffer_mode requires exactly one operand");
-
-    case 19U: /* output_stream number [table]; width is Version-6-only */
+    case 19U:
         return require_range(vm, instruction, 1U, 2U,
                              "output_stream requires one or two operands");
-
-    case 20U: /* input_stream */
+    case 20U:
         return require_exact(vm, instruction, 1U,
                              "input_stream requires exactly one operand");
-
-    case 21U: /* sound_effect: historical zero-operand form is tolerated */
+    case 21U:
         return require_range(vm, instruction, 0U, 4U,
                              "sound_effect accepts at most four operands");
-
-    case 22U: /* read_char 1 [time routine] */
-        return require_range(vm, instruction, 1U, 3U,
-                             "read_char requires one to three operands");
-
-    case 23U: /* scan_table x table len [form] */
+    case 22U:
+        /*
+         * Standard syntax is read_char 1 [time routine]. Galatea release 2/3
+         * contains a historically assembled zero-operand read_char and relies
+         * on interpreters treating the omitted device as the sole keyboard
+         * device (1). Preserve that narrow compatibility form while continuing
+         * to reject four operands and all invalid explicit device/timer values.
+         */
+        return require_range(vm, instruction, 0U, 3U,
+                             "read_char accepts zero to three operands");
+    case 23U:
         return require_range(vm, instruction, 3U, 4U,
                              "scan_table requires three or four operands");
-
-    case 24U: /* not */
+    case 24U:
         return require_exact(vm, instruction, 1U,
                              "not requires exactly one operand");
-
-    case 25U: /* call_vn */
+    case 25U:
         return require_range(vm, instruction, 1U, 4U,
                              "call_vn requires one to four operands");
-
-    case 26U: /* call_vn2 */
+    case 26U:
         return require_range(vm, instruction, 1U, 8U,
                              "call_vn2 requires one to eight operands");
-
-    case 27U: /* tokenise text parse [dictionary flag] */
+    case 27U:
         return require_range(vm, instruction, 2U, 4U,
                              "tokenise requires two to four operands");
-
-    case 28U: /* encode_text zscii length from coded */
+    case 28U:
         return require_exact(vm, instruction, 4U,
                              "encode_text requires exactly four operands");
-
-    case 29U: /* copy_table */
+    case 29U:
         return require_exact(vm, instruction, 3U,
                              "copy_table requires exactly three operands");
-
-    case 30U: /* print_table zscii-text width [height skip] */
+    case 30U:
         return require_range(vm, instruction, 2U, 4U,
                              "print_table requires two to four operands");
-
-    case 31U: /* check_arg_count */
+    case 31U:
         return require_exact(vm, instruction, 1U,
                              "check_arg_count requires exactly one operand");
-
     default:
         return TCL_OK;
     }
 }
 
-/*
- * Reject value-dependent errors which are visible directly in literal operands.
- * VARIABLE operands are deliberately not read here: their evaluation belongs to
- * the executing opcode and may have stack side effects. Literal preflight is
- * useful when a later operand is variable 0; an already-invalid selector must
- * not pop it merely so the lower layer can discover the earlier literal error.
- */
 static int validate_literal_values(ZMachine *vm,
                                    const ZMachineInstruction *instruction)
 {
@@ -446,7 +397,7 @@ static int validate_literal_values(ZMachine *vm,
         return preflight_error(vm, "invalid literal-value preflight request");
 
     if (instruction->operand_count == ZM_OPERANDS_2OP &&
-        instruction->opcode_number == 27U) { /* set_colour */
+        instruction->opcode_number == 27U) {
         if (constant_operand(instruction, 0U, &value) && value > 9U)
             return preflight_error(vm, "unsupported set_colour foreground value");
         if (constant_operand(instruction, 1U, &value) && value > 9U)
@@ -456,16 +407,15 @@ static int validate_literal_values(ZMachine *vm,
 
     if (instruction->form == ZM_FORM_EXTENDED) {
         switch (instruction->opcode_number) {
-        case 0U: /* auxiliary save */
-        case 1U: /* auxiliary restore */
+        case 0U:
+        case 1U:
             if (instruction->operand_count_actual == 4U &&
                 constant_operand(instruction, 3U, &value) && value > 1U)
                 return preflight_error(vm,
                                        "auxiliary save/restore prompt must be 0 or 1");
             break;
-
-        case 2U: /* log_shift */
-        case 3U: /* art_shift */
+        case 2U:
+        case 3U:
             if (constant_operand(instruction, 1U, &value)) {
                 signed_value = (int16_t)value;
                 if (signed_value < -15 || signed_value > 15)
@@ -473,8 +423,7 @@ static int validate_literal_values(ZMachine *vm,
                                            "Z-machine shift count is outside -15..15");
             }
             break;
-
-        case 13U: /* set_true_colour */
+        case 13U:
             if (constant_operand(instruction, 0U, &value)) {
                 signed_value = (int16_t)value;
                 if (signed_value < -2)
@@ -488,7 +437,6 @@ static int validate_literal_values(ZMachine *vm,
                                            "unsupported set_true_colour background value");
             }
             break;
-
         default:
             break;
         }
@@ -500,7 +448,7 @@ static int validate_literal_values(ZMachine *vm,
         return TCL_OK;
 
     switch (instruction->opcode_number) {
-    case 4U: /* read/sread/aread: this host does not advertise timed input */
+    case 4U:
         if (instruction->operand_count_actual >= 3U &&
             constant_operand(instruction, 2U, &value) && value != 0U)
             return preflight_error(vm, "timed line input is unsupported");
@@ -508,13 +456,11 @@ static int validate_literal_values(ZMachine *vm,
             constant_operand(instruction, 3U, &value) && value != 0U)
             return preflight_error(vm, "timed line input routine is unsupported");
         break;
-
-    case 11U: /* set_window: supported V3-5/V7/V8 screen model has two windows */
+    case 11U:
         if (constant_operand(instruction, 0U, &value) && value > 1U)
             return preflight_error(vm, "unsupported Z-machine window number");
         break;
-
-    case 19U: /* output_stream */
+    case 19U:
         if (constant_operand(instruction, 0U, &value)) {
             signed_value = (int16_t)value;
             if (signed_value < -4 || signed_value > 4)
@@ -525,13 +471,11 @@ static int validate_literal_values(ZMachine *vm,
                                        "output_stream 3 requires a table operand");
         }
         break;
-
-    case 20U: /* input_stream */
+    case 20U:
         if (constant_operand(instruction, 0U, &value) && value > 1U)
             return preflight_error(vm, "invalid Z-machine input stream");
         break;
-
-    case 21U: /* sound_effect */
+    case 21U:
         if (instruction->operand_count_actual > 1U &&
             constant_operand(instruction, 0U, &value) && value < 3U)
             return preflight_error(vm,
@@ -545,8 +489,7 @@ static int validate_literal_values(ZMachine *vm,
             return preflight_error(vm,
                                    "Version 3 sound_effect does not support repeats");
         break;
-
-    case 22U: /* read_char */
+    case 22U:
         if (constant_operand(instruction, 0U, &value) && value != 1U)
             return preflight_error(vm, "read_char input device must be 1");
         if (instruction->operand_count_actual > 1U &&
@@ -557,19 +500,16 @@ static int validate_literal_values(ZMachine *vm,
             return preflight_error(vm,
                                    "timed read_char callback is not yet supported");
         break;
-
-    case 23U: /* scan_table optional form */
+    case 23U:
         if (instruction->operand_count_actual == 4U &&
             constant_operand(instruction, 3U, &value) && (value & 0x7fU) == 0U)
             return preflight_error(vm, "scan_table field size is zero");
         break;
-
-    case 27U: /* tokenise */
+    case 27U:
         if (constant_operand(instruction, 1U, &value) && value == 0U)
             return preflight_error(vm,
                                    "tokenise requires a nonzero parse buffer address");
         break;
-
     default:
         break;
     }
@@ -577,18 +517,14 @@ static int validate_literal_values(ZMachine *vm,
     return TCL_OK;
 }
 
-/* Return nonzero for an EXT instruction which the Standard says to ignore. */
 static int ignored_extended_opcode(const ZMachine *vm,
                                    const ZMachineInstruction *instruction)
 {
     if (!vm || !instruction || instruction->form != ZM_FORM_EXTENDED ||
         instruction->opcode_number < 29U)
         return 0;
-
     if (instruction->opcode_number >= 30U)
         return 1;
-
-    /* EXT:29 is buffer_screen only in V6. V5/V7/V8 therefore ignore it. */
     return vm->version != 6U;
 }
 
@@ -598,20 +534,16 @@ int zmachine_preflight_instruction(ZMachine *vm,
 {
     if (ignored)
         *ignored = 0;
-
     if (!vm || !instruction)
         return preflight_error(vm, "invalid decoded opcode preflight request");
-
     if (validate_version(vm, instruction) != TCL_OK)
         return TCL_ERROR;
     if (validate_arity(vm, instruction) != TCL_OK)
         return TCL_ERROR;
     if (validate_literal_values(vm, instruction) != TCL_OK)
         return TCL_ERROR;
-
     if (ignored && ignored_extended_opcode(vm, instruction))
         *ignored = 1;
-
     return TCL_OK;
 }
 
@@ -623,21 +555,17 @@ int zmachine_step(ZMachine *vm)
 
     if (!vm || !vm->memory)
         return preflight_error(vm, "cannot execute without a loaded story");
-
     if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
                                      vm->pc, &instruction,
                                      decode_error, sizeof(decode_error))) {
         return preflight_error(vm, decode_error[0] ? decode_error :
                                "unable to decode Z-machine instruction");
     }
-
     if (zmachine_preflight_instruction(vm, &instruction, &ignored) != TCL_OK)
         return TCL_ERROR;
-
     if (ignored) {
         vm->pc = instruction.next_pc;
         return TCL_OK;
     }
-
     return zmachine_step_preflight_base(vm);
 }
