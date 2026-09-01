@@ -126,6 +126,36 @@ int main(void)
     assert(get_global(&vm, 0x12U) == 1U);
     assert(vm.pc == 0x323U);
 
+    /*
+     * Old Inform libraries can leave an object variable equal to zero and then
+     * issue read-only tree queries through that variable. Global 0x1f is still
+     * zero here, so these exercise the resolved-variable path rather than a
+     * literal-zero compatibility shortcut.
+     */
+    vm.pc = 0x324U;
+    vm.memory[0x324U] = 0xA3U; /* get_parent variable */
+    vm.memory[0x325U] = 0x1FU;
+    vm.memory[0x326U] = 0x16U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(get_global(&vm, 0x16U) == 0U);
+    assert(vm.pc == 0x327U);
+
+    vm.memory[0x327U] = 0xA1U; /* get_sibling variable -> store, false branch */
+    vm.memory[0x328U] = 0x1FU;
+    vm.memory[0x329U] = 0x17U;
+    vm.memory[0x32AU] = 0xC3U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(get_global(&vm, 0x17U) == 0U);
+    assert(vm.pc == 0x32BU);
+
+    vm.memory[0x32BU] = 0xA2U; /* get_child variable -> store, false branch */
+    vm.memory[0x32CU] = 0x1FU;
+    vm.memory[0x32DU] = 0x18U;
+    vm.memory[0x32EU] = 0xC3U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(get_global(&vm, 0x18U) == 0U);
+    assert(vm.pc == 0x32FU);
+
     /* jin 2 1 branches. */
     vm.pc = 0x330U;
     vm.memory[0x330U] = 0x06U;
