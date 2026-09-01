@@ -70,6 +70,9 @@ static void build_objects(ZMachine *vm)
     size_t o2 = entry(2U);
     size_t o3 = entry(3U);
 
+    /* Default property 5 is also used by the null-object get_prop regression. */
+    put16(vm->memory, 0x80U + 8U, 0xA55AU);
+
     /* object 1 children: 2 -> 3 */
     vm->memory[o1 + 6U] = 2U;
     vm->memory[o2 + 4U] = 1U;
@@ -212,6 +215,21 @@ int main(void)
     vm.memory[0x393U] = 0x13U;
     assert(zmachine_step(&vm) == TCL_OK);
     assert(get_global(&vm, 0x13U) == 0x1234U);
+
+    /*
+     * get_prop through a variable whose resolved object value is zero. 0x51 is
+     * long-form 2OP:17 with VARIABLE,SMALL operands, matching the old Inform
+     * sequence seen in Gostak/Mask. Null has no local property 5, so the V3
+     * default-property value is returned.
+     */
+    vm.pc = 0x394U;
+    vm.memory[0x394U] = 0x51U;
+    vm.memory[0x395U] = 0x1FU;
+    vm.memory[0x396U] = 5U;
+    vm.memory[0x397U] = 0x19U;
+    assert(zmachine_step(&vm) == TCL_OK);
+    assert(get_global(&vm, 0x19U) == 0xA55AU);
+    assert(vm.pc == 0x398U);
 
     /* get_prop_addr 1 10 -> global 0x14. */
     vm.pc = 0x3A0U;
