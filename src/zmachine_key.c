@@ -212,7 +212,6 @@ int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
     if (input_kind == 1) {
         int allowed;
 
-        /* Enter always terminates a line in every version. */
         if (zscii != 13U) {
             if (vm->version < 5U ||
                 zscii < ZM_FUNCTION_FIRST || zscii > ZM_FUNCTION_LAST)
@@ -228,12 +227,6 @@ int zmachine_supply_key(ZMachine *vm, uint16_t zscii)
                     "function key is not listed in the Z-machine terminating-character table");
         }
 
-        /*
-         * Do not place an input-only function key in the text buffer. An empty
-         * pending line lets the normal V5 preload wrapper retain text already in
-         * the buffer, while pending_input_terminator carries the exact aread
-         * result back through the ordinary line-input engine.
-         */
         Tcl_DStringSetLength(&vm->pending_input, 0);
         vm->pending_input_terminator = zscii;
         vm->input_available = 1;
@@ -289,13 +282,13 @@ int zmachine_step_input(ZMachine *vm)
 
     if (current_input_kind(vm, &instruction) != 2)
         return key_vm_error(vm, "numeric read_char key was queued outside read_char");
-    if (instruction.operand_count_actual < 1U)
-        return key_vm_error(vm, "read_char is missing its input-device operand");
 
     if (zmachine_resolve_operands(vm, &instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
-    if (values[0] != 1U)
+
+    /* Galatea's historical zero-operand form implies keyboard device 1. */
+    if (instruction.operand_count_actual >= 1U && values[0] != 1U)
         return key_vm_error(vm, "read_char requested an unsupported input device");
     if (instruction.operand_count_actual >= 2U && values[1] != 0U)
         return key_vm_error(vm, "timed read_char is not yet supported");
