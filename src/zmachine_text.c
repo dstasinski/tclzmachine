@@ -319,6 +319,16 @@ int zmachine_text_output_zscii(ZMachine *vm, uint16_t zscii)
     if (zscii == 0U)
         return TCL_OK;
 
+    /*
+     * ZSCII 9 is formally the V6 output TAB. V6 is outside this runtime, but
+     * some legacy V5 story text nevertheless emits it. On the line-oriented
+     * Tcl/IRC surface the safest compatible reduction is the Standard's normal
+     * mid-line TAB rendering: one space. Canonicalize before stream routing so
+     * stream 3 also receives valid supported-version ZSCII rather than byte 9.
+     */
+    if (zscii == 9U)
+        zscii = 32U;
+
     if (zscii >= ZM_ZSCII_EXTRA_FIRST && zscii <= ZM_ZSCII_EXTRA_LAST) {
         if (extra_zscii_unicode(vm, zscii, &unicode, &defined) != TCL_OK)
             return TCL_ERROR;
