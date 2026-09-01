@@ -1,16 +1,21 @@
 /*
  * zmachine_core_extra.c
  *
- * Standards-completeness and validation layer for ordinary control-flow,
- * arithmetic, and host-neutral I/O-selection instructions which are not yet
- * implemented in the original core executor.
+ * Standards-completeness layer for a small set of ordinary control-flow,
+ * arithmetic, and host-neutral I/O-selection instructions not implemented by
+ * the original core executor.
  *
- * This module is deliberately below the text/presentation wrapper. It recognizes
- * only the small set it owns, validates version legality and operand shapes before
- * the older executor can evaluate operands, resolves owned operands exactly once,
- * and delegates every other valid instruction untouched to zmachine_exec.c.
- * Keeping legality checks ahead of operand resolution is essential because reading
- * variable 0 pops the evaluation stack.
+ * Opcode legality no longer lives here. Every public execution path first calls
+ * zmachine_preflight_instruction(), which owns version gates, encoded operand
+ * counts, literal-value rejection, and the Standard's ignored-EXT rule before
+ * any layer may resolve an operand. This module therefore has one job: recognize
+ * the instructions whose runtime semantics it implements, resolve their already
+ * validated operands exactly once, execute them, and delegate everything else.
+ *
+ * Runtime checks which inherently depend on evaluated values remain local. For
+ * example, a variable shift count must be checked after evaluation, and a throw
+ * cookie must still name an active frame. Those are execution semantics rather
+ * than duplicated opcode-table legality.
  *
  * catch/throw use the standard frame cookie: the number of routine frames
  * currently on the system stack. throw discards newer frames, then returns from
@@ -18,19 +23,10 @@
  * implementation-defined signed right-shift behavior by doing all bit movement
  * in the unsigned 16-bit value domain and explicitly filling sign bits.
  *
- * input_stream's physical command-file policy is owned by the higher stream
- * wrapper; this layer retains the host-neutral validation fallback for standard
- * stream numbers. sound_effect is consumed as an unavailable presentation effect
- * after normal operand evaluation because the interpreter header advertises no
- * sampled-sound capability.
- *
- * EXT:29 buffer_screen is meaningful in V6+ and therefore in supported V7/V8.
- * A text-only interpreter may ignore buffering advice provided it always behaves
- * as mode 0, so tclzmachine reports old state 0 without adding screen state.
- * In V5, where EXT:29 is not yet defined, and for EXT:30..255 in all supported
- * versions, the Standard explicitly requires the out-of-range extended opcode to
- * be ignored. Those ignored instructions advance past their decoded operands
- * without resolving them, so variable 0 cannot acquire a spurious stack pop.
+ * input_stream's physical command-file policy is normally owned by the higher
+ * stream wrapper; this layer retains a host-neutral fallback for an already
+ * validated instruction. sound_effect is consumed as an unavailable
+ * presentation effect because this interpreter advertises no sampled sound.
  */
 
 #include "tclzmachine.h"
@@ -53,109 +49,6 @@ static int core_extra_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
-/*
- * Reject version-illegal opcodes before any delegated operand can be resolved.
- *
- * The original executor resolves every operand before entering its opcode switch.
- * That is correct for a legal instruction, but it is observably wrong when an
- * opcode does not exist in the current story version and an operand is variable
- * 0: the illegal instruction can pop the evaluation stack before being rejected.
- * This preflight therefore covers every version-gated ordinary opcode family that
- * may otherwise delegate to the older executor or to a higher compatibility
- * wrapper.
- *
- * Two exceptions are intentional. VAR:21 sound_effect is accepted from V3 for
- * compatibility with historical Infocom story files even though its formal
- * Standard entry is V5/3. EXT:29..255 retain the Standard's special ignore rule;
- * EXT:29 is therefore not rejected in V5, and EXT:30+ are never rejected here.
- */
-static int validate_opcode_version(ZMachine *vm,
-                                   const ZMachineInstruction *instruction)
-{
-    uint8_t opcode;
-
-    if (!vm || !instruction)
-        return core_extra_error(vm, "invalid opcode version validation request");
-
-    opcode = instruction->opcode_number;
-
-    if (instruction->form == ZM_FORM_EXTENDED) {
-        if (vm->version < 5U)
-            return core_extra_error(vm, "extended opcode is illegal before V5");
-
-        /* EXT:14 and EXT:15 are reserved and are not in the EXT:29+ ignore range. */
-        if (opcode == 14U || opcode == 15U)
-            return core_extra_error(vm, "reserved extended Z-machine opcode");
-
-        /* These opcode ranges first become defined in V6. */
-        if (vm->version < 6U &&
-            ((opcode >= 5U && opcode <= 8U) ||
-             (opcode >= 16U && opcode <= 28U)))
-            return core_extra_error(vm, "extended opcode requires V6 or later");
-
-        return TCL_OK;
-    }
-
-    if (instruction->operand_count == ZM_OPERANDS_2OP) {
-        if (opcode == 25U && vm->version < 4U)
-            return core_extra_error(vm, "call_2s is illegal before V4");
-        if (opcode >= 26U && opcode <= 28U && vm->version < 5U)
-            return core_extra_error(vm, "2OP opcode requires V5 or later");
-        return TCL_OK;
-    }
-
-    if (instruction->operand_count == ZM_OPERANDS_1OP) {
-        if (opcode == 8U && vm->version < 4U)
-            return core_extra_error(vm, "call_1s is illegal before V4");
-        return TCL_OK;
-    }
-
-    if (instruction->form != ZM_FORM_VARIABLE ||
-        instruction->operand_count != ZM_OPERANDS_VAR)
-        return TCL_OK;
-
-    switch (opcode) {
-    case 10U: /* split_window */
-    case 11U: /* set_window */
-    case 19U: /* output_stream */
-    case 20U: /* input_stream */
-    case 21U: /* sound_effect: historical V3 compatibility */
-        if (vm->version < 3U)
-            return core_extra_error(vm, "VAR opcode requires V3 or later");
-        break;
-
-    case 12U: /* call_vs2 */
-    case 13U: /* erase_window */
-    case 14U: /* erase_line */
-    case 15U: /* set_cursor */
-    case 16U: /* get_cursor */
-    case 17U: /* set_text_style */
-    case 18U: /* buffer_mode */
-    case 22U: /* read_char */
-    case 23U: /* scan_table */
-        if (vm->version < 4U)
-            return core_extra_error(vm, "VAR opcode requires V4 or later");
-        break;
-
-    case 24U: /* not */
-    case 25U: /* call_vn */
-    case 26U: /* call_vn2 */
-    case 27U: /* tokenise */
-    case 28U: /* encode_text */
-    case 29U: /* copy_table */
-    case 30U: /* print_table */
-    case 31U: /* check_arg_count */
-        if (vm->version < 5U)
-            return core_extra_error(vm, "VAR opcode requires V5 or later");
-        break;
-
-    default:
-        break;
-    }
-
-    return TCL_OK;
-}
-
 /* Store one opcode result and continue after its store-variable byte. */
 static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 {
@@ -173,105 +66,11 @@ static int store_value(ZMachine *vm, uint32_t store_pc, uint16_t value)
 }
 
 /*
- * Validate operand counts for opcodes delegated to the original executor.
+ * Return nonzero only for opcode families whose runtime semantics live here.
  *
- * Long and short encodings structurally guarantee their normal fixed operand
- * counts, but variable-form 2OP instructions carry an explicit operand-type byte.
- * Malformed story data can therefore omit operands while still decoding as a 2OP
- * opcode. The original executor predates this hardening layer and directly reads
- * values[1], or values[2] for several VAR opcodes. Reject impossible arities here
- * so corrupt Z-code produces a deterministic VM error instead of reading an
- * uninitialized temporary operand.
- *
- * `je` is the one base 2OP exception: it accepts two through four operands and
- * compares the first against each later value. Call-family VAR opcodes accept
- * their documented argument ranges; fixed-shape memory/output operations require
- * exactly the listed operands.
- */
-static int validate_delegated_arity(ZMachine *vm,
-                                    const ZMachineInstruction *instruction)
-{
-    uint8_t count;
-
-    if (!vm || !instruction)
-        return core_extra_error(vm, "invalid opcode arity validation request");
-
-    count = instruction->operand_count_actual;
-
-    if (instruction->operand_count == ZM_OPERANDS_2OP &&
-        instruction->opcode_number >= 1U &&
-        instruction->opcode_number <= 26U) {
-        if (instruction->opcode_number == 1U) {
-            if (count < 2U || count > 4U)
-                return core_extra_error(vm,
-                                        "je requires between two and four operands");
-        } else if (count != 2U) {
-            return core_extra_error(vm,
-                                    "2OP instruction requires exactly two operands");
-        }
-        return TCL_OK;
-    }
-
-    if (instruction->form != ZM_FORM_VARIABLE ||
-        instruction->operand_count != ZM_OPERANDS_VAR)
-        return TCL_OK;
-
-    switch (instruction->opcode_number) {
-    case 0U: /* call_vs: routine plus up to three arguments */
-        if (count < 1U || count > 4U)
-            return core_extra_error(vm, "call_vs requires one to four operands");
-        break;
-
-    case 1U: /* storew */
-    case 2U: /* storeb */
-    case 3U: /* put_prop */
-        if (count != 3U)
-            return core_extra_error(vm,
-                                    "three-operand VAR instruction has invalid arity");
-        break;
-
-    case 5U: /* print_char */
-    case 6U: /* print_num */
-    case 8U: /* push */
-    case 9U: /* pull in supported non-V6 versions */
-        if (count != 1U)
-            return core_extra_error(vm,
-                                    "single-operand VAR instruction has invalid arity");
-        break;
-
-    case 12U: /* call_vs2: routine plus up to seven arguments */
-        if (vm->version >= 4U && (count < 1U || count > 8U))
-            return core_extra_error(vm, "call_vs2 requires one to eight operands");
-        break;
-
-    case 25U: /* call_vn: routine plus up to three arguments */
-        if (vm->version >= 5U && (count < 1U || count > 4U))
-            return core_extra_error(vm, "call_vn requires one to four operands");
-        break;
-
-    case 26U: /* call_vn2: routine plus up to seven arguments */
-        if (vm->version >= 5U && (count < 1U || count > 8U))
-            return core_extra_error(vm, "call_vn2 requires one to eight operands");
-        break;
-
-    case 29U: /* copy_table */
-        if (vm->version >= 5U && count != 3U)
-            return core_extra_error(vm, "copy_table requires exactly three operands");
-        break;
-
-    default:
-        break;
-    }
-
-    return TCL_OK;
-}
-
-/*
- * Return nonzero only for opcode families owned by this layer.
- *
- * VAR-table operations require ZM_FORM_VARIABLE explicitly: extended
- * instructions share the decoder's VAR-sized operand bucket, so an opcode
- * number alone is never sufficient to identify a VAR instruction.
+ * Physical form remains part of dispatch identity. EXTENDED instructions share
+ * the decoder's VAR-sized operand bucket, so an opcode number alone must never
+ * be used to identify a VAR-table instruction.
  */
 static int owns_instruction(const ZMachine *vm,
                             const ZMachineInstruction *instruction)
@@ -279,24 +78,16 @@ static int owns_instruction(const ZMachine *vm,
     if (!vm || !instruction)
         return 0;
 
-    if (vm->version >= 3U &&
-        instruction->form == ZM_FORM_VARIABLE &&
+    if (instruction->form == ZM_FORM_VARIABLE &&
         instruction->operand_count == ZM_OPERANDS_VAR &&
         (instruction->opcode_number == 20U ||
          instruction->opcode_number == 21U))
         return 1; /* input_stream / sound_effect */
 
-    if (vm->version < 5U)
-        return 0;
-
-    /* EXT:29+ needs the Standard's version-sensitive ignore rule. */
-    if (instruction->form == ZM_FORM_EXTENDED &&
-        instruction->opcode_number >= 29U)
-        return 1;
-
-    if (instruction->operand_count == ZM_OPERANDS_0OP &&
+    if (vm->version >= 5U &&
+        instruction->operand_count == ZM_OPERANDS_0OP &&
         instruction->opcode_number == 9U)
-        return 1; /* catch */
+        return 1; /* catch; V1-V4 opcode 9 is pop and is run-loop owned */
 
     if (instruction->operand_count == ZM_OPERANDS_2OP &&
         instruction->opcode_number == 28U)
@@ -371,12 +162,11 @@ static uint16_t arithmetic_shift(uint16_t number, int16_t places)
 /*
  * Execute one instruction through the pure-core completeness layer.
  *
- * Every decoded instruction first receives version-legality and narrow arity
- * validation before any delegated executor can resolve its operands. Unrecognized
- * valid instructions then delegate untouched. Owned operations are evaluated
- * according to their exact opcode contracts. The Standard leaves shifts outside
- * -15..+15 undefined; this runtime rejects them deterministically rather than
- * invoking undefined C shifts or silently inventing semantics.
+ * The caller has already passed the shared preflight. Unrecognized instructions
+ * delegate untouched. Owned operations resolve operands exactly once. The
+ * Standard leaves shift counts outside -15..+15 undefined; this runtime rejects
+ * a runtime-computed out-of-range count deterministically rather than invoking
+ * undefined C shift behavior.
  */
 int zmachine_step_core(ZMachine *vm)
 {
@@ -394,56 +184,8 @@ int zmachine_step_core(ZMachine *vm)
                                 "unable to decode Z-machine instruction");
     }
 
-    if (validate_opcode_version(vm, &instruction) != TCL_OK)
-        return TCL_ERROR;
-
-    if (validate_delegated_arity(vm, &instruction) != TCL_OK)
-        return TCL_ERROR;
-
     if (!owns_instruction(vm, &instruction))
         return zmachine_step_core_base(vm);
-
-    /*
-     * Out-of-range EXT opcodes are a deliberate exception to ordinary operand
-     * evaluation. In V5, EXT:29 is not defined yet; EXT:30..255 are reserved or
-     * implementation-specific in every supported version. The Standard says to
-     * ignore these instructions, so advance over their decoded operand bytes
-     * without resolving variables (especially stack variable 0).
-     *
-     * EXT:29 becomes buffer_screen in V6+ and is handled normally below. Since
-     * V6 stories are rejected at load time, this path is principally for V7/V8.
-     */
-    if (instruction.form == ZM_FORM_EXTENDED &&
-        instruction.opcode_number >= 29U &&
-        (instruction.opcode_number != 29U || vm->version < 6U)) {
-        vm->pc = instruction.next_pc;
-        return TCL_OK;
-    }
-
-    /*
-     * buffer_screen mode -> result (V6+).
-     *
-     * This runtime has no visible display backing store. The Standard permits an
-     * interpreter to ignore the buffering advice if it always behaves as though
-     * mode 0 is active. Therefore the old state is deterministically 0 for mode
-     * 0, mode 1, and the -1 immediate-update request. Arity/range validation is
-     * performed before storing a result, and the single operand is evaluated
-     * exactly once like every other real opcode.
-     */
-    if (instruction.form == ZM_FORM_EXTENDED &&
-        instruction.opcode_number == 29U) {
-        int16_t mode;
-
-        if (instruction.operand_count_actual != 1U)
-            return core_extra_error(vm, "buffer_screen requires exactly one mode operand");
-        if (zmachine_resolve_operands(vm, &instruction, values,
-                                      ZM_MAX_OPERANDS) != TCL_OK)
-            return TCL_ERROR;
-        mode = (int16_t)values[0];
-        if (mode != -1 && mode != 0 && mode != 1)
-            return core_extra_error(vm, "invalid buffer_screen mode");
-        return store_value(vm, instruction.next_pc, 0U);
-    }
 
     if (instruction.operand_count_actual > 0U &&
         zmachine_resolve_operands(vm, &instruction, values,
@@ -454,12 +196,10 @@ int zmachine_step_core(ZMachine *vm)
         instruction.operand_count == ZM_OPERANDS_VAR &&
         instruction.opcode_number == 20U) {
         /*
-         * input_stream 0/1 selects keyboard/command-file input in a terminal
-         * interpreter. The higher stream wrapper supplies the actual host-file
-         * policy; this fallback still validates the only standard stream values.
+         * input_stream 0/1 selects keyboard/command-file input. The higher stream
+         * wrapper normally supplies actual host-file policy; this fallback only
+         * preserves the standard semantic values when reached directly.
          */
-        if (instruction.operand_count_actual != 1U)
-            return core_extra_error(vm, "input_stream requires one operand");
         if (values[0] > 1U)
             return core_extra_error(vm, "invalid Z-machine input stream");
         vm->pc = instruction.next_pc;
@@ -471,13 +211,11 @@ int zmachine_step_core(ZMachine *vm)
         instruction.opcode_number == 21U) {
         /*
          * Sound is intentionally unavailable in the text-only frontend. The
-         * Standard specifically asks interpreters not to halt on the historical
-         * zero-operand sound_effect form, so every syntactically decoded form is
-         * consumed after operand evaluation. No completion callback is invoked
-         * because no asynchronous sound was started.
+         * Standard asks interpreters not to halt on the historical zero-operand
+         * sound_effect form, so a preflight-valid form is consumed after normal
+         * operand evaluation. No completion callback is invoked because no sound
+         * was started.
          */
-        if (instruction.operand_count_actual > 4U)
-            return core_extra_error(vm, "sound_effect has too many operands");
         vm->pc = instruction.next_pc;
         return TCL_OK;
     }
@@ -485,39 +223,28 @@ int zmachine_step_core(ZMachine *vm)
     if (instruction.operand_count == ZM_OPERANDS_0OP &&
         instruction.opcode_number == 9U) {
         /* catch -> result: the Quetzal specification fixes this cookie value. */
-        if (instruction.operand_count_actual != 0U)
-            return core_extra_error(vm, "catch does not accept operands");
         return store_value(vm, instruction.next_pc,
                            (uint16_t)vm->frame_count);
     }
 
     if (instruction.operand_count == ZM_OPERANDS_2OP &&
-        instruction.opcode_number == 28U) {
-        if (instruction.operand_count_actual != 2U)
-            return core_extra_error(vm, "throw requires value and stack-frame operands");
+        instruction.opcode_number == 28U)
         return execute_throw(vm, values[0], values[1]);
-    }
 
     if (instruction.form == ZM_FORM_VARIABLE &&
         instruction.operand_count == ZM_OPERANDS_VAR &&
-        instruction.opcode_number == 24U) {
-        if (instruction.operand_count_actual != 1U)
-            return core_extra_error(vm, "not requires one operand");
+        instruction.opcode_number == 24U)
         return store_value(vm, instruction.next_pc, (uint16_t)~values[0]);
-    }
 
     if (instruction.form == ZM_FORM_EXTENDED &&
         (instruction.opcode_number == 2U ||
          instruction.opcode_number == 3U)) {
-        int16_t places;
+        int16_t places = (int16_t)values[1];
         uint16_t result;
 
-        if (instruction.operand_count_actual != 2U)
-            return core_extra_error(vm, "shift opcode requires number and places operands");
-
-        places = (int16_t)values[1];
         if (places < -15 || places > 15)
-            return core_extra_error(vm, "Z-machine shift count is outside -15..15");
+            return core_extra_error(vm,
+                                    "Z-machine shift count is outside -15..15");
 
         result = instruction.opcode_number == 2U ?
                  logical_shift(values[0], places) :
