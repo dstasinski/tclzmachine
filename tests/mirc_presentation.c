@@ -149,6 +149,31 @@ int main(void)
         Tcl_DStringFree(&wrapped);
     }
 
+    /*
+     * If visible formatted text exactly fills the byte budget, a following
+     * Ctrl-O reset belongs to the message boundary and must not be pushed onto
+     * a control-only continuation line. Later visible text begins unformatted.
+     */
+    {
+        Tcl_DString wrapped;
+        const char exact_reset[] = "\x02" "1234567" "\x0f";
+        const char exact_then_plain[] = "\x02" "1234567" "\x0f" "X";
+
+        Tcl_DStringInit(&wrapped);
+        assert(zmachine_mirc_wrap_output(exact_reset,
+                                         sizeof(exact_reset) - 1U,
+                                         8U, &wrapped) == TCL_OK);
+        assert(strcmp(Tcl_DStringValue(&wrapped),
+                      "\x02" "1234567") == 0);
+
+        assert(zmachine_mirc_wrap_output(exact_then_plain,
+                                         sizeof(exact_then_plain) - 1U,
+                                         8U, &wrapped) == TCL_OK);
+        assert(strcmp(Tcl_DStringValue(&wrapped),
+                      "\x02" "1234567\nX") == 0);
+        Tcl_DStringFree(&wrapped);
+    }
+
     puts("mIRC presentation tests passed");
     return 0;
 }
