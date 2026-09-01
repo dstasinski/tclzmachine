@@ -136,6 +136,15 @@ static int validate_version(ZMachine *vm,
     }
 
     if (instruction->operand_count == ZM_OPERANDS_2OP) {
+        /*
+         * The Standard defines 2OP:1 through 2OP:28 only. Opcode 0 and slots
+         * 29..31 are not instructions in any supported version. Reject them at
+         * the encoded-legality boundary so a VARIABLE operand (especially
+         * variable 0) cannot be evaluated before the VM discovers that the
+         * opcode number itself is undefined.
+         */
+        if (opcode == 0U || opcode >= 29U)
+            return preflight_error(vm, "undefined Z-machine 2OP opcode");
         if (opcode == 25U && vm->version < 4U)
             return preflight_error(vm, "call_2s is illegal before V4");
         if (opcode >= 26U && opcode <= 28U && vm->version < 5U)
