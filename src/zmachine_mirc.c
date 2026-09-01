@@ -905,6 +905,23 @@ int zmachine_mirc_wrap_output(const char *text,
 
         if ((size_t)Tcl_DStringLength(&line) + token_length > max_bytes &&
             line_has_visible) {
+            /*
+             * Ctrl-O only exists to reset formatting within an IRC message.
+             * If the visible physical line already consumes the exact byte
+             * budget, moving that reset to a new line would create either a
+             * control-only line or a redundant formatting-prefix/reset pair
+             * before later text. The IRC message boundary itself resets all
+             * formatting, so consume the overflowing Ctrl-O here. If more text
+             * follows, the next visible token will naturally force the full
+             * line to be emitted before it is retried under the reset state.
+             */
+            if (is_control && token_length == 1U &&
+                (unsigned char)text[pos] == (unsigned char)MIRC_RESET) {
+                active = next;
+                pos += token_length;
+                continue;
+            }
+
             if (have_last_space) {
                 Tcl_DStringSetLength(&line, (int)last_space_line_length);
                 append_line_and_newline(result, &line);
