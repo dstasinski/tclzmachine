@@ -3,9 +3,10 @@
  *
  * Direct unit coverage for the version-aware object/property subsystem.
  * Synthetic V3 and V5 object tables verify the two physical entry layouts,
- * byte-vs-word relationship fields, attribute widths, tree removal/insertion,
- * property defaults, one- and two-byte property values, property addresses,
- * descending property iteration, and V4+ two-byte property-size headers.
+ * byte-vs-word relationship fields, null-object read-only relation probes,
+ * attribute widths, tree removal/insertion, property defaults, one- and
+ * two-byte property values, property addresses, descending property iteration,
+ * and V4+ two-byte property-size headers.
  *
  * These tests call object helpers directly rather than executing opcodes, so a
  * failure isolates table-layout/property parsing from instruction dispatch.
@@ -63,7 +64,7 @@ static size_t v5_entry(size_t table, unsigned object)
 
 int main(void)
 {
-    /* V3 relationships, 32 attributes, removal, and insertion. */
+    /* V3 relationships, null probes, 32 attributes, removal, and insertion. */
     {
         ZMachine vm;
         uint16_t value;
@@ -83,6 +84,13 @@ int main(void)
         assert(zmachine_object_get_child(&vm, 1U, &value) == TCL_OK && value == 2U);
         assert(zmachine_object_get_parent(&vm, 2U, &value) == TCL_OK && value == 1U);
         assert(zmachine_object_get_sibling(&vm, 2U, &value) == TCL_OK && value == 3U);
+
+        value = 0xffffU;
+        assert(zmachine_object_get_parent(&vm, 0U, &value) == TCL_OK && value == 0U);
+        value = 0xffffU;
+        assert(zmachine_object_get_sibling(&vm, 0U, &value) == TCL_OK && value == 0U);
+        value = 0xffffU;
+        assert(zmachine_object_get_child(&vm, 0U, &value) == TCL_OK && value == 0U);
 
         assert(zmachine_object_set_attr(&vm, 2U, 0U, 1) == TCL_OK);
         assert(zmachine_object_test_attr(&vm, 2U, 0U, &set) == TCL_OK && set);
@@ -142,7 +150,7 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* V5 16-bit relationships, 48 attributes, and both property-header forms. */
+    /* V5 16-bit relationships, null probes, 48 attributes, and property headers. */
     {
         ZMachine vm;
         uint16_t value, next;
@@ -156,6 +164,14 @@ int main(void)
         put16(vm.memory, o2 + 6U, 1U);
         assert(zmachine_object_get_child(&vm, 1U, &value) == TCL_OK && value == 2U);
         assert(zmachine_object_get_parent(&vm, 2U, &value) == TCL_OK && value == 1U);
+
+        value = 0xffffU;
+        assert(zmachine_object_get_parent(&vm, 0U, &value) == TCL_OK && value == 0U);
+        value = 0xffffU;
+        assert(zmachine_object_get_sibling(&vm, 0U, &value) == TCL_OK && value == 0U);
+        value = 0xffffU;
+        assert(zmachine_object_get_child(&vm, 0U, &value) == TCL_OK && value == 0U);
+
         assert(zmachine_object_set_attr(&vm, 2U, 47U, 1) == TCL_OK);
         assert(zmachine_object_test_attr(&vm, 2U, 47U, &set) == TCL_OK && set);
 
