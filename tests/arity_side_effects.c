@@ -99,7 +99,7 @@ int main(void)
     /* Undefined 2OP:0 must fail before resolving either variable operand. */
     {
         static const uint8_t code[] = {
-            0xC0U, 0xAFU, /* variable-form 2OP:0; variable, variable */
+            0xC0U, 0xAFU,
             0x00U, 0x01U
         };
         expect_preflight_error(5U, code, sizeof(code),
@@ -107,10 +107,9 @@ int main(void)
                                0xB001U);
     }
 
-    /* Undefined 2OP:29-31 slots receive the same pre-resolution rejection. */
     {
         static const uint8_t code[] = {
-            0xDDU, 0xAFU, /* variable-form 2OP:29; variable, variable */
+            0xDDU, 0xAFU,
             0x00U, 0x01U
         };
         expect_preflight_error(5U, code, sizeof(code),
@@ -197,7 +196,7 @@ int main(void)
             0xF6U, 0x95U, 0x00U, 0x01U, 0x00U, 0x00U
         };
         expect_preflight_error(5U, code, sizeof(code),
-                               "read_char requires one to three operands",
+                               "read_char accepts zero to three operands",
                                0xB606U);
     }
 
