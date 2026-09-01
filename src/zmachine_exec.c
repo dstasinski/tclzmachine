@@ -84,6 +84,25 @@ static int write_word(ZMachine *vm, uint32_t address, uint16_t value)
 }
 
 /*
+ * Compute addresses for the direct array opcodes in the 16-bit VM value domain.
+ *
+ * loadw/loadb/storew/storeb operands are 16-bit quantities. Long-standing
+ * interpreter behavior (and the Praxix conformance tests) treats overflow in
+ * base+index address arithmetic as 16-bit wraparound. Keeping the final direct
+ * address in uint16_t also makes negative-looking indices such as $ffff reach
+ * bytes immediately before a base address, matching deployed story behavior.
+ */
+static uint32_t direct_byte_address(uint16_t base, uint16_t index)
+{
+    return (uint16_t)(base + index);
+}
+
+static uint32_t direct_word_address(uint16_t base, uint16_t index)
+{
+    return (uint16_t)(base + (uint16_t)(2U * index));
+}
+
+/*
  * Evaluate every decoded operand from left to right into caller-owned storage.
  *
  * Large/small constants already contain their values. VARIABLE operands are
@@ -456,7 +475,7 @@ static int execute_2op(ZMachine *vm,
         vm->pc = instruction->next_pc;
         return TCL_OK;
     case 15U: {
-        uint32_t addr = (uint32_t)values[0] + 2U * (uint32_t)values[1];
+        uint32_t addr = direct_word_address(values[0], values[1]);
         uint16_t v;
         if (read_word(vm, addr, &v) != TCL_OK) {
             exec_error(vm, "Z-machine loadw address is outside story memory");
@@ -465,7 +484,7 @@ static int execute_2op(ZMachine *vm,
         return execute_store(vm, instruction, v);
     }
     case 16U: {
-        uint32_t addr = (uint32_t)values[0] + (uint32_t)values[1];
+        uint32_t addr = direct_byte_address(values[0], values[1]);
         uint8_t v;
         if (read_byte(vm, addr, &v) != TCL_OK) {
             exec_error(vm, "Z-machine loadb address is outside story memory");
@@ -762,13 +781,13 @@ int zmachine_step(ZMachine *vm)
         switch (instruction.opcode_number) {
         case 0U: return execute_call(vm, &instruction, values, 0); /* call_vs */
         case 1U: {                               /* storew */
-            uint32_t addr = (uint32_t)values[0] + 2U * (uint32_t)values[1];
+            uint32_t addr = direct_word_address(values[0], values[1]);
             if (write_word(vm, addr, values[2]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
         }
         case 2U: {                               /* storeb */
-            uint32_t addr = (uint32_t)values[0] + (uint32_t)values[1];
+            uint32_t addr = direct_byte_address(values[0], values[1]);
             if (write_byte(vm, addr, (uint8_t)values[2]) != TCL_OK) return TCL_ERROR;
             vm->pc = instruction.next_pc;
             return TCL_OK;
