@@ -5,7 +5,8 @@
  * Synthetic instruction streams verify LONG, SHORT, VARIABLE, and V5+ EXTENDED
  * forms; logical 2OP-vs-VAR table classification; large/small/variable operand
  * decoding; the second type byte used by call_vs2/call_vn2; the pre-V5 meaning
- * of opcode byte 0xBE; and deterministic rejection of truncated instructions.
+ * of opcode byte 0xBE; the historical Galatea zero-operand read_char
+ * normalization; and deterministic rejection of truncated instructions.
  *
  * These tests intentionally stop before operand resolution or execution. Their
  * purpose is to lock down the boundary between raw story bytes and the uniform
@@ -121,6 +122,23 @@ int main(void)
         assert(i.operand_count == ZM_OPERANDS_0OP);
         assert(i.opcode_number == 14);
         assert(i.next_pc == 1);
+    }
+
+    /*
+     * Galatea's released Z8 contains VAR:22 with an all-omitted type byte.
+     * Normalize it to the Standard-equivalent keyboard device 1 without
+     * consuming the following store-variable byte.
+     */
+    {
+        const uint8_t b[] = {0xf6, 0xff, 0x10};
+        ZMachineInstruction i = decode(b, sizeof(b), 8);
+        assert(i.form == ZM_FORM_VARIABLE);
+        assert(i.operand_count == ZM_OPERANDS_VAR);
+        assert(i.opcode_number == 22);
+        assert(i.operand_count_actual == 1);
+        assert(i.operands[0].type == ZM_OPERAND_SMALL_CONSTANT);
+        assert(i.operands[0].value == 1);
+        assert(i.next_pc == 2);
     }
 
     /* Missing payload bytes must produce a useful truncated-instruction error. */
