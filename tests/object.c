@@ -5,8 +5,9 @@
  * Synthetic V3 and V5 object tables verify the two physical entry layouts,
  * byte-vs-word relationship fields, null-object read-only relation probes,
  * attribute widths, tree removal/insertion, property defaults, one- and
- * two-byte property values, property addresses, descending property iteration,
- * and V4+ two-byte property-size headers.
+ * two-byte property values, long-property read compatibility, property
+ * addresses, descending property iteration, and V4+ two-byte property-size
+ * headers.
  *
  * These tests call object helpers directly rather than executing opcodes, so a
  * failure isolates table-layout/property parsing from instruction dispatch.
@@ -194,6 +195,15 @@ int main(void)
         vm.memory[0x30AU] = 0U;
 
         assert(zmachine_object_get_prop(&vm, 1U, 40U, &value) == TCL_OK && value == 0xCAFEU);
+
+        /*
+         * The Standard leaves get_prop on a >2-byte property unspecified.
+         * Pre-6.3 Inform code can issue this form, so use the first word as a
+         * deterministic compatibility result while keeping put_prop strict.
+         */
+        assert(zmachine_object_get_prop(&vm, 1U, 3U, &value) == TCL_OK && value == 0x0102U);
+        assert(zmachine_object_put_prop(&vm, 1U, 3U, 0xBEEFU) == TCL_ERROR);
+
         assert(zmachine_object_get_next_prop(&vm, 1U, 40U, &next) == TCL_OK && next == 3U);
         assert(zmachine_object_get_next_prop(&vm, 1U, 3U, &next) == TCL_OK && next == 0U);
         free_vm(&vm);
