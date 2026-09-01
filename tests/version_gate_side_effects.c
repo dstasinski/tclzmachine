@@ -6,9 +6,9 @@
  * evaluation stack, so an opcode which is illegal in the current story version
  * must be rejected without evaluating that operand.
  *
- * These tests deliberately encode otherwise-decodable illegal instructions with
- * variable 0 as their first operand and a sentinel on the evaluation stack. Each
- * step must fail while leaving the sentinel untouched.
+ * Versions 7 and 8 use the Version-5 instruction/screen model except for their
+ * documented memory/address differences. V6-only presentation/graphics opcodes
+ * therefore remain illegal in V7/V8 even though their numeric version is larger.
  */
 
 #include "tclzmachine.h"
@@ -71,10 +71,10 @@ int main(void)
     /* V3 may decode 2OP:25, but call_2s does not exist until V4. */
     {
         static const uint8_t code[] = {
-            0xD9U,       /* variable-form 2OP:25 call_2s */
-            0x9FU,       /* variable, small constant, omitted, omitted */
-            0x00U,       /* variable 0: must not pop */
-            0x01U        /* arg1 */
+            0xD9U,
+            0x9FU,
+            0x00U,
+            0x01U
         };
         expect_version_error(3U, code, sizeof(code),
                              "call_2s is illegal before V4", 0xA101U);
@@ -83,7 +83,7 @@ int main(void)
     /* call_2n is V5+, so a V4 story must fail before resolving variable 0. */
     {
         static const uint8_t code[] = {
-            0xDAU,       /* variable-form 2OP:26 call_2n */
+            0xDAU,
             0x9FU,
             0x00U,
             0x01U
@@ -92,10 +92,10 @@ int main(void)
                              "2OP opcode requires V5 or later", 0xA202U);
     }
 
-    /* set_colour is also V5+, including when encoded in variable 2OP form. */
+    /* set_colour is also V5+, including variable-form 2OP encoding. */
     {
         static const uint8_t code[] = {
-            0xDBU,       /* variable-form 2OP:27 set_colour */
+            0xDBU,
             0x9FU,
             0x00U,
             0x01U
@@ -107,8 +107,8 @@ int main(void)
     /* Short-form 1OP:8 call_1s begins in V4. */
     {
         static const uint8_t code[] = {
-            0xA8U,       /* short 1OP:8 with VARIABLE operand */
-            0x00U        /* variable 0: must not pop */
+            0xA8U,
+            0x00U
         };
         expect_version_error(3U, code, sizeof(code),
                              "call_1s is illegal before V4", 0xA404U);
@@ -117,27 +117,22 @@ int main(void)
     /* call_vs2 has two operand-type bytes and begins in V4. */
     {
         static const uint8_t code[] = {
-            0xECU,       /* VAR:12 call_vs2 */
-            0xBFU,       /* variable, then omitted */
-            0xFFU,       /* remaining operands omitted */
-            0x00U        /* routine from variable 0 */
+            0xECU,
+            0xBFU,
+            0xFFU,
+            0x00U
         };
         expect_version_error(3U, code, sizeof(code),
                              "VAR opcode requires V4 or later", 0xA505U);
     }
 
-    /* call_vn and call_vn2 are V5-only additions. */
+    /* call_vn and call_vn2 are V5 additions. */
     {
         static const uint8_t call_vn[] = {
-            0xF9U,       /* VAR:25 call_vn */
-            0xBFU,
-            0x00U
+            0xF9U, 0xBFU, 0x00U
         };
         static const uint8_t call_vn2[] = {
-            0xFAU,       /* VAR:26 call_vn2 */
-            0xBFU,
-            0xFFU,
-            0x00U
+            0xFAU, 0xBFU, 0xFFU, 0x00U
         };
         expect_version_error(4U, call_vn, sizeof(call_vn),
                              "VAR opcode requires V5 or later", 0xA606U);
@@ -148,9 +143,7 @@ int main(void)
     /* VAR:24 is the V5+ form of not; V1-V4 use 1OP:15 instead. */
     {
         static const uint8_t code[] = {
-            0xF8U,       /* VAR:24 not */
-            0xBFU,
-            0x00U
+            0xF8U, 0xBFU, 0x00U
         };
         expect_version_error(4U, code, sizeof(code),
                              "VAR opcode requires V5 or later", 0xA808U);
@@ -159,24 +152,40 @@ int main(void)
     /* split_window does not exist before V3. */
     {
         static const uint8_t code[] = {
-            0xEAU,       /* VAR:10 split_window */
-            0xBFU,
-            0x00U
+            0xEAU, 0xBFU, 0x00U
         };
         expect_version_error(2U, code, sizeof(code),
                              "VAR opcode requires V3 or later", 0xA909U);
     }
 
-    /* EXT:16 is V6+, and unlike EXT:29+ it is not in the ignore range. */
+    /* EXT:16 belongs to the Version-6-only window model. */
     {
         static const uint8_t code[] = {
-            0xBEU,       /* extended-opcode prefix in V5+ */
-            0x10U,       /* EXT:16 move_window */
-            0xBFU,       /* one variable operand is enough to test preflight */
+            0xBEU,
+            0x10U,
+            0xBFU,
             0x00U
         };
         expect_version_error(5U, code, sizeof(code),
-                             "extended opcode requires V6 or later", 0xAA0AU);
+                             "available only in Version 6", 0xAA0AU);
+        expect_version_error(7U, code, sizeof(code),
+                             "available only in Version 6", 0xAA1AU);
+        expect_version_error(8U, code, sizeof(code),
+                             "available only in Version 6", 0xAA2AU);
+    }
+
+    /* EXT:5 draw_picture likewise must not become legal merely because V7 > V6. */
+    {
+        static const uint8_t code[] = {
+            0xBEU,
+            0x05U,
+            0xBFU,
+            0x00U
+        };
+        expect_version_error(7U, code, sizeof(code),
+                             "available only in Version 6", 0xAB0BU);
+        expect_version_error(8U, code, sizeof(code),
+                             "available only in Version 6", 0xAB1BU);
     }
 
     puts("opcode version preflight side-effect tests passed");
