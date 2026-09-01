@@ -3,16 +3,14 @@
  *
  * Regression tests for cooperative line input.
  *
- * The first case exercises normal V5 text+parse input, dictionary tokenization,
- * and host-side character validation. The second covers Infocom-compatible V5
- * code which omits the parse operand entirely. The terminating-key cases drive
- * the V5+ header $2e table through the public host-input API: unlisted function
- * keys must be rejected without disturbing the wait, listed keys must become
- * aread's stored result without entering the text buffer, and table value 255
- * must accept any keyboard function key while preserving preloaded text.
+ * Coverage includes normal V5 text+parse input, the established one-operand V5
+ * compatibility form, version-specific structural validation before suspension,
+ * immediate rejection of literal timed-input requests this host cannot support,
+ * and V5+ terminating-character handling through the public key API.
  */
 
 #include "tclzmachine.h"
+#include "zmachine_state.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -47,6 +45,7 @@ static void init_vm(ZMachine *vm)
     vm->globals_addr = 0x40U;
     vm->state = ZM_STATE_READY;
     vm->pending_input_terminator = 13U;
+    vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
 }
@@ -62,20 +61,20 @@ static void free_vm(ZMachine *vm)
 static void install_one_operand_read(ZMachine *vm)
 {
     vm->memory[0x20U] = 0xE4U;
-    vm->memory[0x21U] = 0x3FU; /* large constant, then omitted operands */
+    vm->memory[0x21U] = 0x3FU;
     put16(vm->memory, 0x22U, 0x0080U);
-    vm->memory[0x24U] = 0x10U; /* terminating-character store variable */
-    vm->memory[0x25U] = 0xBAU; /* quit */
+    vm->memory[0x24U] = 0x10U;
+    vm->memory[0x25U] = 0xBAU;
     vm->memory[0x80U] = 20U;
 }
 
 int main(void)
 {
+    /* Normal V5 read, tokenization, and ASCII host-input validation. */
     {
         ZMachine vm;
         init_vm(&vm);
 
-        /* read 0x80 0xa0 -> global 0x10; then quit. */
         vm.memory[0x20U] = 0xE4U;
         vm.memory[0x21U] = 0x0FU;
         put16(vm.memory, 0x22U, 0x0080U);
@@ -86,7 +85,6 @@ int main(void)
         vm.memory[0x80U] = 20U;
         vm.memory[0xA0U] = 4U;
 
-        /* V5 dictionary containing the single word "look". */
         vm.memory[0x120U] = 0U;
         vm.memory[0x121U] = 6U;
         put16(vm.memory, 0x122U, 1U);
@@ -101,11 +99,6 @@ int main(void)
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(vm.pc == 0x20U);
 
-        /*
-         * Tcl strings are UTF-8 but the current line-input capability is
-         * printable ASCII ZSCII only. Reject both multibyte Unicode and control
-         * characters without consuming the pending read or poisoning the VM.
-         */
         assert(zmachine_supply_input(&vm, "\xC3\xA9") == TCL_ERROR);
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(vm.input_available == 0);
@@ -135,14 +128,10 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* Preserve the established V5 omitted-parse compatibility path. */
     {
         ZMachine vm;
         init_vm(&vm);
-
-        /*
-         * V5 read with only the text-buffer operand. The remaining operand
-         * slots are omitted, so compatibility behavior is parse-buffer zero.
-         */
         install_one_operand_read(&vm);
 
         assert(zmachine_run(&vm) == TCL_OK);
@@ -158,12 +147,86 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* V3 read cannot acquire a third timed operand and must fail before wait/pop. */
+    {
+        ZMachine vm;
+        init_vm(&vm);
+        vm.version = 3U;
+        vm.memory[0x20U] = 0xE4U;
+        vm.memory[0x21U] = 0x97U; /* variable, small, small, omitted */
+        vm.memory[0x22U] = 0x00U; /* variable 0: must not pop */
+        vm.memory[0x23U] = 0xA0U;
+        vm.memory[0x24U] = 0x00U;
+        assert(zmachine_stack_push(&vm, 0xD303U) == TCL_OK);
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "V1-V3 read requires exactly two operands") != NULL);
+        assert(vm.sp == 1U && vm.stack[0] == 0xD303U);
+
+        free_vm(&vm);
+    }
+
+    /* V4 requires both text and parse before it may suspend. */
+    {
+        ZMachine vm;
+        init_vm(&vm);
+        vm.version = 4U;
+        vm.memory[0x20U] = 0xE4U;
+        vm.memory[0x21U] = 0xBFU;
+        vm.memory[0x22U] = 0x00U;
+        assert(zmachine_stack_push(&vm, 0xD404U) == TCL_OK);
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "V4 read requires two to four operands") != NULL);
+        assert(vm.sp == 1U && vm.stack[0] == 0xD404U);
+
+        free_vm(&vm);
+    }
+
+    /* A valid V4 two-operand read may suspend without evaluating variable 0. */
+    {
+        ZMachine vm;
+        init_vm(&vm);
+        vm.version = 4U;
+        vm.memory[0x20U] = 0xE4U;
+        vm.memory[0x21U] = 0x9FU; /* variable, small, omitted, omitted */
+        vm.memory[0x22U] = 0x00U;
+        vm.memory[0x23U] = 0xA0U;
+        assert(zmachine_stack_push(&vm, 0xD414U) == TCL_OK);
+
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_WAITING_INPUT);
+        assert(vm.sp == 1U && vm.stack[0] == 0xD414U);
+
+        free_vm(&vm);
+    }
+
+    /* Literal nonzero timed input is unsupported and must not suspend first. */
+    {
+        ZMachine vm;
+        init_vm(&vm);
+        vm.memory[0x20U] = 0xE4U;
+        vm.memory[0x21U] = 0x07U; /* large, large, small, omitted */
+        put16(vm.memory, 0x22U, 0x0080U);
+        put16(vm.memory, 0x24U, 0x00A0U);
+        vm.memory[0x26U] = 1U;
+        vm.memory[0x27U] = 0x10U;
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "timed line input is unsupported") != NULL);
+
+        free_vm(&vm);
+    }
+
+    /* Header word $2e selecting one terminating function key. */
     {
         ZMachine vm;
         init_vm(&vm);
         install_one_operand_read(&vm);
 
-        /* Header word $2e selects a table containing cursor-up only. */
         put16(vm.memory, 0x2EU, 0x0150U);
         vm.memory[0x150U] = 129U;
         vm.memory[0x151U] = 0U;
@@ -172,7 +235,6 @@ int main(void)
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(vm.pc == 0x20U);
 
-        /* Cursor-down is valid ZSCII input but is not terminating here. */
         assert(zmachine_supply_key(&vm, 130U) == TCL_ERROR);
         assert(vm.state == ZM_STATE_WAITING_INPUT);
         assert(vm.pc == 0x20U);
@@ -195,12 +257,12 @@ int main(void)
         free_vm(&vm);
     }
 
+    /* 255 means any function key; preloaded text must survive termination. */
     {
         ZMachine vm;
         init_vm(&vm);
         install_one_operand_read(&vm);
 
-        /* 255 means any function key; preload text must survive termination. */
         put16(vm.memory, 0x2EU, 0x0150U);
         vm.memory[0x150U] = 255U;
         vm.memory[0x151U] = 0U;
