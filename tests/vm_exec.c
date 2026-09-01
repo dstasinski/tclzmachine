@@ -6,7 +6,8 @@
  * entry/local initialization, return/store behavior, left-to-right operand
  * resolution, direct and computed indirect-variable references (especially
  * stack variable 0), call-null semantics, arithmetic/branch instructions,
- * variable-form signed division/remainder, and dynamic-memory stores.
+ * variable-form signed division/remainder, dynamic-memory stores, and 16-bit
+ * direct-array address wrapping.
  *
  * Higher cooperative layers such as input, file requests, presentation, and
  * lexical opcodes have dedicated tests; this file is intended to keep failures
@@ -312,6 +313,61 @@ int main(void)
         vm.memory[0x22] = 0x80U; vm.memory[0x23] = 2U; vm.memory[0x24] = 0x12U; vm.memory[0x25] = 0x34U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.memory[0x84] == 0x12U && vm.memory[0x85] == 0x34U);
+        free_vm(&vm);
+    }
+
+    /*
+     * Direct array address arithmetic wraps in the 16-bit Z-machine domain.
+     * These values deliberately overflow 0xffff before landing at low memory,
+     * matching the long-standing interpreter behavior exercised by Praxix.
+     */
+    {
+        ZMachine vm;
+        init_vm(&vm, 5U, 8192U);
+        vm.memory[0x0002U] = 0x12U;
+        vm.memory[0x0003U] = 0x34U;
+        vm.memory[0x0005U] = 0xA5U;
+
+        /* loadw $1000 $f801 -> $0002 */
+        vm.pc = 0x100U;
+        vm.memory[0x100U] = 0xCFU;
+        vm.memory[0x101U] = 0x0FU;
+        vm.memory[0x102U] = 0x10U; vm.memory[0x103U] = 0x00U;
+        vm.memory[0x104U] = 0xF8U; vm.memory[0x105U] = 0x01U;
+        vm.memory[0x106U] = 0x10U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(read_global(&vm, 0x10U) == 0x1234U);
+
+        /* loadb $1000 $f005 -> $0005 */
+        vm.pc = 0x110U;
+        vm.memory[0x110U] = 0xD0U;
+        vm.memory[0x111U] = 0x0FU;
+        vm.memory[0x112U] = 0x10U; vm.memory[0x113U] = 0x00U;
+        vm.memory[0x114U] = 0xF0U; vm.memory[0x115U] = 0x05U;
+        vm.memory[0x116U] = 0x11U;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(read_global(&vm, 0x11U) == 0x00A5U);
+
+        /* storew $1000 $f803 $beef -> $0006 */
+        vm.pc = 0x120U;
+        vm.memory[0x120U] = 0xE1U;
+        vm.memory[0x121U] = 0x03U;
+        vm.memory[0x122U] = 0x10U; vm.memory[0x123U] = 0x00U;
+        vm.memory[0x124U] = 0xF8U; vm.memory[0x125U] = 0x03U;
+        vm.memory[0x126U] = 0xBEU; vm.memory[0x127U] = 0xEFU;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.memory[0x0006U] == 0xBEU && vm.memory[0x0007U] == 0xEFU);
+
+        /* storeb $1000 $f009 $005a -> $0009 */
+        vm.pc = 0x130U;
+        vm.memory[0x130U] = 0xE2U;
+        vm.memory[0x131U] = 0x03U;
+        vm.memory[0x132U] = 0x10U; vm.memory[0x133U] = 0x00U;
+        vm.memory[0x134U] = 0xF0U; vm.memory[0x135U] = 0x09U;
+        vm.memory[0x136U] = 0x00U; vm.memory[0x137U] = 0x5AU;
+        assert(zmachine_step(&vm) == TCL_OK);
+        assert(vm.memory[0x0009U] == 0x5AU);
+
         free_vm(&vm);
     }
 
