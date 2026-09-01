@@ -118,11 +118,26 @@ static int relation_offset(const ZMachine *vm, int which, uint32_t *offset)
     return TCL_OK;
 }
 
-/* Read one tree relationship, widening V1-V3's byte-sized object number. */
+/*
+ * Read one tree relationship, widening V1-V3's byte-sized object number.
+ *
+ * Object zero is the Z-machine null object and has no physical table entry.
+ * The Standard leaves object-zero operands undefined, but old Inform libraries
+ * emitted null-object tree probes.  Treating parent/sibling/child of null as
+ * null is a harmless read-only compatibility result and avoids manufacturing an
+ * object-table address.  Mutating operations and unrelated object access stay
+ * strict.
+ */
 static int get_relation(const ZMachine *vm, uint16_t object, int which, uint16_t *value)
 {
     uint32_t entry, offset;
-    if (!value || object_entry(vm, object, &entry) != TCL_OK ||
+    if (!vm || !value)
+        return TCL_ERROR;
+    if (object == 0U) {
+        *value = 0U;
+        return TCL_OK;
+    }
+    if (object_entry(vm, object, &entry) != TCL_OK ||
         relation_offset(vm, which, &offset) != TCL_OK)
         return TCL_ERROR;
     if (vm->version <= 3U) {
@@ -153,25 +168,8 @@ int zmachine_object_get_parent(const ZMachine *vm, uint16_t object, uint16_t *pa
 { return get_relation(vm, object, 0, parent); }
 int zmachine_object_get_sibling(const ZMachine *vm, uint16_t object, uint16_t *sibling)
 { return get_relation(vm, object, 1, sibling); }
-/*
- * Treat object zero as the null object for get_child only.
- *
- * There is no object-table entry for zero, but legacy story code can ask for
- * its child and expect the ordinary "no child" result.  Handling the case here
- * is important because opcode operands have already been resolved by the core;
- * a VARIABLE operand naming stack variable 0 must be popped exactly once before
- * its runtime value is tested.  Other object operations remain strict.
- */
 int zmachine_object_get_child(const ZMachine *vm, uint16_t object, uint16_t *child)
-{
-    if (!vm || !child)
-        return TCL_ERROR;
-    if (object == 0U) {
-        *child = 0U;
-        return TCL_OK;
-    }
-    return get_relation(vm, object, 2, child);
-}
+{ return get_relation(vm, object, 2, child); }
 int zmachine_object_set_parent(ZMachine *vm, uint16_t object, uint16_t parent)
 { return set_relation(vm, object, 0, parent); }
 int zmachine_object_set_sibling(ZMachine *vm, uint16_t object, uint16_t sibling)
