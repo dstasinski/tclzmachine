@@ -271,6 +271,26 @@ int zmachine_decode_instruction(const uint8_t *memory,
         }
     }
 
+    /*
+     * Compatibility normalization for the released Galatea Z8.
+     *
+     * Standard read_char is VAR:22 with keyboard device 1 as its first operand.
+     * Galatea contains a historically assembled form whose type byte omits all
+     * operands. Treat that one malformed encoding as if it had encoded small
+     * constant 1. No story byte is consumed, so next_pc still points at the
+     * original store-variable byte and every downstream execution layer sees
+     * the same Standard-equivalent instruction.
+     */
+    if (version >= 4U &&
+        instruction->form == ZM_FORM_VARIABLE &&
+        instruction->operand_count == ZM_OPERANDS_VAR &&
+        instruction->opcode_number == 22U &&
+        instruction->operand_count_actual == 0U) {
+        instruction->operands[0].type = ZM_OPERAND_SMALL_CONSTANT;
+        instruction->operands[0].value = 1U;
+        instruction->operand_count_actual = 1U;
+    }
+
     /* Opcode-specific trailing data begins at next_pc. */
     instruction->next_pc = pc;
     return 1;
