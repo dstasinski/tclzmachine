@@ -48,6 +48,24 @@ static uint16_t read_be16(const uint8_t *p)
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
+/* Inspect a literal operand without resolving VARIABLE operands. */
+static int constant_operand(const ZMachineInstruction *instruction,
+                            uint8_t index,
+                            uint16_t *value)
+{
+    const ZMachineDecodedOperand *operand;
+
+    if (!instruction || index >= instruction->operand_count_actual)
+        return 0;
+    operand = &instruction->operands[index];
+    if (operand->type != ZM_OPERAND_SMALL_CONSTANT &&
+        operand->type != ZM_OPERAND_LARGE_CONSTANT)
+        return 0;
+    if (value)
+        *value = operand->value;
+    return 1;
+}
+
 /* Store an opcode result and return the address immediately following it. */
 static int store_result(ZMachine *vm, uint32_t store_pc,
                         uint16_t value, uint32_t *next_pc)
@@ -173,12 +191,15 @@ static uint16_t random_result(ZMachine *vm, int16_t range)
  * Handle VAR:4 read/sread/aread at the cooperative host boundary.
  *
  * Structural validation happens before suspension, but operands are not
- * evaluated until input is actually available. This distinction is observable
- * when an operand is variable 0: merely yielding for input must not pop the
- * evaluation stack. V5+ permits a missing/zero parse buffer and stores the
- * terminating character. Timed input is not advertised by this runtime, so
- * nonzero timeout/routine operands are rejected rather than silently pretending
- * the timeout facility exists.
+ * evaluated until input is actually available. V1-V3 require text+parse; V4
+ * adds the optional timed pair. V5/V7/V8 use the V5 form. This project retains
+ * its established compatibility exception allowing a V5-compatible story to
+ * omit parse entirely, treating that exactly like parse address zero.
+ *
+ * Literal nonzero timed operands are rejected before suspension because this
+ * host advertises no timed-input capability. VARIABLE timed operands are not
+ * inspected early: evaluating one may pop stack variable 0, so they are resolved
+ * exactly once only after host input is actually available.
  */
 static int handle_read(ZMachine *vm,
                        const ZMachineInstruction *instruction,
@@ -188,7 +209,9 @@ static int handle_read(ZMachine *vm,
     uint16_t text_buffer;
     uint16_t parse_buffer;
     uint16_t terminator = 13U;
+    uint16_t literal;
     uint32_t next_pc;
+    uint8_t count;
 
     *handled = 0;
     if (!vm || !instruction ||
@@ -198,9 +221,23 @@ static int handle_read(ZMachine *vm,
         return TCL_OK;
 
     *handled = 1;
-    if (instruction->operand_count_actual < 1U ||
-        (vm->version <= 4U && instruction->operand_count_actual < 2U))
-        return run_error(vm, "read opcode is missing required buffer operands");
+    count = instruction->operand_count_actual;
+    if (vm->version <= 3U) {
+        if (count != 2U)
+            return run_error(vm, "V1-V3 read requires exactly two operands");
+    } else if (vm->version == 4U) {
+        if (count < 2U || count > 4U)
+            return run_error(vm, "V4 read requires two to four operands");
+    } else if (count < 1U || count > 4U) {
+        return run_error(vm, "V5-compatible read requires one to four operands");
+    }
+
+    if (count >= 3U &&
+        constant_operand(instruction, 2U, &literal) && literal != 0U)
+        return run_error(vm, "timed line input is unsupported");
+    if (count >= 4U &&
+        constant_operand(instruction, 3U, &literal) && literal != 0U)
+        return run_error(vm, "timed line input routine is unsupported");
 
     if (!vm->input_available) {
         vm->state = ZM_STATE_WAITING_INPUT;
@@ -211,13 +248,13 @@ static int handle_read(ZMachine *vm,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
 
-    if (instruction->operand_count_actual >= 3U && values[2] != 0U)
+    if (count >= 3U && values[2] != 0U)
         return run_error(vm, "timed line input is unsupported");
-    if (instruction->operand_count_actual >= 4U && values[3] != 0U)
+    if (count >= 4U && values[3] != 0U)
         return run_error(vm, "timed line input routine is unsupported");
 
     text_buffer = values[0];
-    parse_buffer = instruction->operand_count_actual >= 2U ? values[1] : 0U;
+    parse_buffer = count >= 2U ? values[1] : 0U;
 
     if (zmachine_input_read_line(vm, text_buffer, parse_buffer,
                                  &terminator) != TCL_OK)
@@ -348,7 +385,6 @@ static int handle_interpreter_opcode(ZMachine *vm,
             *handled = 1;
             if (vm->version < 5U)
                 return run_error(vm, "piracy is unavailable before Version 5");
-            /* Standards-conforming interpreters always take the piracy branch. */
             return apply_branch(vm, instruction->next_pc, 1);
 
         default:
@@ -365,12 +401,6 @@ static int handle_interpreter_opcode(ZMachine *vm,
         instruction->opcode_number != 31U)
         return TCL_OK;
 
-    /*
-     * Establish ownership, version legality, and arity before resolving any
-     * operand. Returning handled=1 on an illegal owned opcode prevents a lower
-     * layer from resolving the same variable operands again while reporting a
-     * generic unsupported-opcode failure.
-     */
     switch (instruction->opcode_number) {
     case 7U: /* random range -> result */
         *handled = 1;
@@ -404,7 +434,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
         return TCL_ERROR;
 
     switch (instruction->opcode_number) {
-    case 7U: { /* random range -> result */
+    case 7U: {
         uint32_t next_pc;
 
         if (store_result(vm, instruction->next_pc,
@@ -415,7 +445,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
         return TCL_OK;
     }
 
-    case 23U: { /* scan_table x table len [form] -> result ?branch */
+    case 23U: {
         uint16_t form;
         uint16_t result = 0U;
         uint16_t i;
@@ -456,7 +486,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
         return apply_branch(vm, branch_pc, result != 0U);
     }
 
-    case 31U: { /* check_arg_count argument-number ?branch */
+    case 31U: {
         const ZMachineFrame *frame;
         uint16_t argument_number;
         int supplied = 0;
@@ -474,14 +504,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
     }
 }
 
-/*
- * Execute synchronously until input/file interaction, halt, or error.
- *
- * Each loop iteration decodes once for the two interpreter-owned interception
- * layers. An ordinary instruction then executes through public zmachine_step(),
- * which may itself yield for save/restore file policy. The generous instruction
- * cap bounds malformed stories which never yield to their Tcl host.
- */
+/* Execute synchronously until input/file interaction, halt, or error. */
 int zmachine_run(ZMachine *vm)
 {
     unsigned long steps = 0UL;
