@@ -37,10 +37,10 @@ The audit currently finds **no missing named opcode in the supported V1-V5/V7/V8
 | 2OP:12 | `clear_attr` | V1+ | FULL | Object subsystem. |
 | 2OP:13 | `store` | V1+ | FULL | Indirect target-variable semantics. |
 | 2OP:14 | `insert_obj` | V1+ | FULL | Object subsystem. |
-| 2OP:15 | `loadw` | V1+ | FULL | Bounds-checked story-memory read. |
-| 2OP:16 | `loadb` | V1+ | FULL | Bounds-checked story-memory read. |
-| 2OP:17 | `get_prop` | V1+ | FULL | Property subsystem. |
-| 2OP:18 | `get_prop_addr` | V1+ | FULL | Property subsystem. |
+| 2OP:15 | `loadw` | V1+ | FULL | Bounds-checked story-memory read after 16-bit `base + 2*index` address wrapping. |
+| 2OP:16 | `loadb` | V1+ | FULL | Bounds-checked story-memory read after 16-bit `base + index` address wrapping. |
+| 2OP:17 | `get_prop` | V1+ | FULL | Property subsystem; legacy object-0 reads return the selected default property. |
+| 2OP:18 | `get_prop_addr` | V1+ | FULL | Property subsystem; null object/property probes return the normal absent result 0. |
 | 2OP:19 | `get_next_prop` | V1+ | FULL | Property subsystem. |
 | 2OP:20 | `add` | V1+ | FULL | 16-bit wrap semantics. |
 | 2OP:21 | `sub` | V1+ | FULL | 16-bit wrap semantics. |
@@ -59,10 +59,10 @@ The audit currently finds **no missing named opcode in the supported V1-V5/V7/V8
 | Opcode | Name | Version | Status | Implementation / note |
 | --- | --- | --- | --- | --- |
 | 1OP:0 | `jz` | V1+ | FULL | Core branch executor. |
-| 1OP:1 | `get_sibling` | V1+ | FULL | Object subsystem. |
-| 1OP:2 | `get_child` | V1+ | FULL | Object subsystem; literal object 0 has a legacy-compatible zero/false path. |
-| 1OP:3 | `get_parent` | V1+ | FULL | Object subsystem. |
-| 1OP:4 | `get_prop_len` | V1+ | FULL | Version-correct property-length decoding. |
+| 1OP:1 | `get_sibling` | V1+ | FULL | Object subsystem; object 0 yields zero/false for legacy read-only probes. |
+| 1OP:2 | `get_child` | V1+ | FULL | Object subsystem; object 0 yields zero/false for legacy read-only probes. |
+| 1OP:3 | `get_parent` | V1+ | FULL | Object subsystem; object 0 yields zero for legacy read-only probes. |
+| 1OP:4 | `get_prop_len` | V1+ | FULL | Version-correct property-length decoding; address 0 returns 0 as required. |
 | 1OP:5 | `inc` | V1+ | FULL | Indirect variable semantics. |
 | 1OP:6 | `dec` | V1+ | FULL | Indirect variable semantics. |
 | 1OP:7 | `print_addr` | V1+ | FULL | Z-text subsystem. |
@@ -102,11 +102,11 @@ The audit currently finds **no missing named opcode in the supported V1-V5/V7/V8
 | Opcode | Name | Version | Status | Implementation / note |
 | --- | --- | --- | --- | --- |
 | VAR:0 | `call` / `call_vs` | V1+ / V4+ name | FULL | Common routine-call machinery. |
-| VAR:1 | `storew` | V1+ | FULL | Dynamic-memory checked word write. |
-| VAR:2 | `storeb` | V1+ | FULL | Dynamic-memory checked byte write. |
+| VAR:1 | `storew` | V1+ | FULL | Dynamic-memory checked word write after 16-bit `base + 2*index` wrapping. |
+| VAR:2 | `storeb` | V1+ | FULL | Dynamic-memory checked byte write after 16-bit `base + index` wrapping. |
 | VAR:3 | `put_prop` | V1+ | FULL | Property subsystem. |
-| VAR:4 | `sread` / `aread` | V1+ | HOST | Cooperative Tcl input, tokenization, preloaded V5 text, terminating keys; timed input intentionally unavailable. |
-| VAR:5 | `print_char` | V1+ | FULL | ZSCII output. |
+| VAR:4 | `sread` / `aread` | V1+ | HOST | Cooperative Tcl input, tokenization, preloaded V5 text, terminating keys; timed capability is not advertised and legacy timed forms degrade to untimed input. |
+| VAR:5 | `print_char` | V1+ | FULL | ZSCII output; legacy ZSCII 9 is reduced to one space on the text-only surface. |
 | VAR:6 | `print_num` | V1+ | FULL | Signed decimal output. |
 | VAR:7 | `random` | V1+ | FULL | Session PRNG and standard seed contract. |
 | VAR:8 | `push` | V1+ | FULL | Evaluation stack. |
@@ -123,7 +123,7 @@ The audit currently finds **no missing named opcode in the supported V1-V5/V7/V8
 | VAR:19 | `output_stream` | V3+ | HOST | Streams 1-4, nested stream 3, transcript and command-record files implemented. |
 | VAR:20 | `input_stream` | V3+ | HOST | Keyboard/command-file replay implemented. |
 | VAR:21 | `sound_effect` | V5, historical V3 compatibility | COMPAT | Sound capability is not advertised; valid forms are consumed without starting sound/callbacks. |
-| VAR:22 | `read_char` | V4+ | HOST | Cooperative character/ZSCII-key input; timed input intentionally unavailable. |
+| VAR:22 | `read_char` | V4+ | HOST | Cooperative character/ZSCII-key input; timed capability is not advertised and legacy timed forms degrade to untimed input. |
 | VAR:23 | `scan_table` | V4+ | FULL | Word/byte forms and optional field-size form. |
 | VAR:24 | `not` | V5/V7/V8 | FULL | 16-bit complement. |
 | VAR:25 | `call_vn` | V5/V7/V8 | FULL | Discard-result routine call. |
@@ -185,7 +185,7 @@ The next release-hardening work is therefore not broad opcode implementation. It
 
 ## Known capability limits relevant to opcode conformance
 
-- Timed `read`/`read_char` is not implemented and is not advertised.
+- Timed `read`/`read_char` callbacks are not implemented and are not advertised. Legacy timed forms degrade to ordinary untimed input rather than aborting.
 - Sampled sound is not implemented and is not advertised; `sound_effect` is consumed safely.
 - Pictures, mouse, menus, and the V6 window model are not implemented; V6 stories are rejected.
 - Fixed-pitch/font-3 presentation is not advertised.
