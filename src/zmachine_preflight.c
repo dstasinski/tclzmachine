@@ -5,25 +5,22 @@
  *
  * Several higher layers own opcodes before execution reaches the original core:
  * external stream selection, lexical operations, numeric input, presentation,
- * and optional mIRC styling.  Those layers historically performed their own
- * minimum-operand checks, but a malformed instruction could still contain extra
- * VARIABLE operands.  Resolving variable 0 pops the evaluation stack, so an
- * instruction which is going to be rejected for version or arity must be
- * rejected before any owning layer evaluates any operand.
+ * and optional mIRC styling. A malformed instruction can contain VARIABLE
+ * operands even when its opcode, arity, or literal selector is already known to
+ * be invalid. Resolving variable 0 pops the evaluation stack, so all rejection
+ * which can be decided from the encoded instruction must happen first.
  *
- * This wrapper is therefore the public zmachine_step() entry point.  It decodes
- * once, checks version legality first, then checks structural operand counts for
- * the supported non-V6 instruction model, and only then delegates the untouched
- * instruction to the former public stream wrapper.  Lower-layer checks remain as
- * defense in depth and for value-dependent legality such as output_stream 3
- * requiring a table operand.
+ * Versions 7 and 8 are explicitly defined by the Standard as Version-5 machines
+ * except for their documented memory/address changes. They therefore use the V5
+ * screen model and V5 opcode signatures rather than the special V6 window,
+ * graphics, and formatted-output forms. Version 6 story files are intentionally
+ * unsupported by this text-only runtime.
  *
- * The checks intentionally preserve two project/Standard compatibility rules:
- * sound_effect is accepted from V3 because historical Infocom V3 code used it,
- * and out-of-range EXT:29+ opcodes retain the Standard's ignore behavior.  In
- * particular, V5 EXT:29 is ignored rather than arity-validated; EXT:29 becomes
- * buffer_screen only in V6+, which means supported V7/V8 execute its one-operand
- * form normally.
+ * This wrapper is the public zmachine_step() entry point. It decodes once, checks
+ * version legality, structural operand counts, and literal value constraints,
+ * then delegates the untouched instruction to the former public stream wrapper.
+ * EXT:29..255 retain the Standard's special ignore rule; ignored instructions
+ * advance over their encoded operands without evaluating them.
  */
 
 #include "tclzmachine.h"
@@ -43,12 +40,30 @@ static int preflight_error(ZMachine *vm, const char *message)
     return TCL_ERROR;
 }
 
+/* Return a decoded literal without evaluating VARIABLE operands. */
+static int constant_operand(const ZMachineInstruction *instruction,
+                            uint8_t index,
+                            uint16_t *value)
+{
+    const ZMachineDecodedOperand *operand;
+
+    if (!instruction || index >= instruction->operand_count_actual)
+        return 0;
+    operand = &instruction->operands[index];
+    if (operand->type != ZM_OPERAND_SMALL_CONSTANT &&
+        operand->type != ZM_OPERAND_LARGE_CONSTANT)
+        return 0;
+    if (value)
+        *value = operand->value;
+    return 1;
+}
+
 /*
  * Establish opcode-version legality before considering operand shape.
  *
- * This mirrors the lower core guard deliberately: higher ownership layers may
- * consume an instruction before it reaches that core guard, so the invariant
- * must also exist at the outermost execution boundary.
+ * V6 has a distinct screen model. Although many opcode-table entries begin at
+ * V6, the Standard separately states that V7/V8 are identical to V5 except for
+ * memory/address changes. Thus V6-only EXT instructions remain illegal in V7/V8.
  */
 static int validate_version(ZMachine *vm,
                             const ZMachineInstruction *instruction)
@@ -67,10 +82,11 @@ static int validate_version(ZMachine *vm,
         if (opcode == 14U || opcode == 15U)
             return preflight_error(vm, "reserved extended Z-machine opcode");
 
-        if (vm->version < 6U &&
+        if (vm->version != 6U &&
             ((opcode >= 5U && opcode <= 8U) ||
              (opcode >= 16U && opcode <= 28U)))
-            return preflight_error(vm, "extended opcode requires V6 or later");
+            return preflight_error(vm,
+                                   "extended opcode is available only in Version 6");
 
         return TCL_OK;
     }
@@ -157,14 +173,7 @@ static int require_range(ZMachine *vm,
     return TCL_OK;
 }
 
-/*
- * Validate operand counts which can be decided from decoded structure alone.
- *
- * Value-dependent rules stay in their owning layer.  For example output_stream
- * accepts one or two operands structurally; after the stream number is evaluated,
- * selecting stream 3 still requires the second table operand.  This preflight's
- * job is to reject impossible counts before resolving *any* operand.
- */
+/* Validate operand counts which are decidable without evaluating operands. */
 static int validate_arity(ZMachine *vm,
                           const ZMachineInstruction *instruction)
 {
@@ -200,7 +209,7 @@ static int validate_arity(ZMachine *vm,
             return require_exact(vm, instruction, 2U,
                                  "shift opcode requires exactly two operands");
 
-        case 4U: /* set_font */
+        case 4U: /* set_font -- V6 window form is not a V7/V8 form */
             return require_exact(vm, instruction, 1U,
                                  "set_font requires exactly one operand");
 
@@ -217,12 +226,12 @@ static int validate_arity(ZMachine *vm,
             return require_exact(vm, instruction, 1U,
                                  "check_unicode requires exactly one operand");
 
-        case 13U: /* set_true_colour; optional window is V6-only */
+        case 13U: /* set_true_colour -- optional window exists only in V6 */
             return require_exact(vm, instruction, 2U,
                                  "set_true_colour requires exactly two operands");
 
-        case 29U: /* buffer_screen only once it is defined in V6+ */
-            if (vm->version >= 6U)
+        case 29U: /* real buffer_screen exists only in V6; otherwise ignored */
+            if (vm->version == 6U)
                 return require_exact(vm, instruction, 1U,
                                      "buffer_screen requires exactly one operand");
             break;
@@ -248,12 +257,25 @@ static int validate_arity(ZMachine *vm,
         return require_exact(vm, instruction, 3U,
                              "three-operand VAR instruction has invalid arity");
 
-    /* VAR:4 read has version-dependent optional operands; its owner validates it. */
+    case 4U: /* read/sread/aread */
+        if (vm->version <= 3U)
+            return require_exact(vm, instruction, 2U,
+                                 "V1-V3 read requires exactly two operands");
+        if (vm->version == 4U)
+            return require_range(vm, instruction, 2U, 4U,
+                                 "V4 read requires two to four operands");
+        /*
+         * Standard V5 syntax names both text and parse. Preserve the project's
+         * established Infocom-compatibility path which treats an omitted parse
+         * operand as an explicit zero parse buffer; timed operands remain optional.
+         */
+        return require_range(vm, instruction, 1U, 4U,
+                             "V5-compatible read requires one to four operands");
 
     case 5U: /* print_char */
     case 6U: /* print_num */
     case 8U: /* push */
-    case 9U: /* pull in supported non-V6 versions */
+    case 9U: /* pull: V6 user-stack form is not used by V7/V8 */
         return require_exact(vm, instruction, 1U,
                              "single-operand VAR instruction has invalid arity");
 
@@ -281,7 +303,7 @@ static int validate_arity(ZMachine *vm,
         return require_exact(vm, instruction, 1U,
                              "erase_line requires exactly one operand");
 
-    case 15U: /* set_cursor */
+    case 15U: /* set_cursor -- optional window exists only in V6 */
         return require_exact(vm, instruction, 2U,
                              "set_cursor requires exactly two operands");
 
@@ -297,7 +319,7 @@ static int validate_arity(ZMachine *vm,
         return require_exact(vm, instruction, 1U,
                              "buffer_mode requires exactly one operand");
 
-    case 19U: /* output_stream number [table]; width is V6-only */
+    case 19U: /* output_stream number [table]; width is Version-6-only */
         return require_range(vm, instruction, 1U, 2U,
                              "output_stream requires one or two operands");
 
@@ -354,6 +376,160 @@ static int validate_arity(ZMachine *vm,
     }
 }
 
+/*
+ * Reject value-dependent errors which are visible directly in literal operands.
+ * VARIABLE operands are deliberately not read here: their evaluation belongs to
+ * the executing opcode and may have stack side effects. Literal preflight is
+ * useful when a later operand is variable 0; an already-invalid selector must
+ * not pop it merely so the lower layer can discover the earlier literal error.
+ */
+static int validate_literal_values(ZMachine *vm,
+                                   const ZMachineInstruction *instruction)
+{
+    uint16_t value;
+    int16_t signed_value;
+
+    if (!vm || !instruction)
+        return preflight_error(vm, "invalid literal-value preflight request");
+
+    if (instruction->operand_count == ZM_OPERANDS_2OP &&
+        instruction->opcode_number == 27U) { /* set_colour */
+        if (constant_operand(instruction, 0U, &value) && value > 9U)
+            return preflight_error(vm, "unsupported set_colour foreground value");
+        if (constant_operand(instruction, 1U, &value) && value > 9U)
+            return preflight_error(vm, "unsupported set_colour background value");
+        return TCL_OK;
+    }
+
+    if (instruction->form == ZM_FORM_EXTENDED) {
+        switch (instruction->opcode_number) {
+        case 0U: /* auxiliary save */
+        case 1U: /* auxiliary restore */
+            if (instruction->operand_count_actual == 4U &&
+                constant_operand(instruction, 3U, &value) && value > 1U)
+                return preflight_error(vm,
+                                       "auxiliary save/restore prompt must be 0 or 1");
+            break;
+
+        case 2U: /* log_shift */
+        case 3U: /* art_shift */
+            if (constant_operand(instruction, 1U, &value)) {
+                signed_value = (int16_t)value;
+                if (signed_value < -15 || signed_value > 15)
+                    return preflight_error(vm,
+                                           "Z-machine shift count is outside -15..15");
+            }
+            break;
+
+        case 13U: /* set_true_colour */
+            if (constant_operand(instruction, 0U, &value)) {
+                signed_value = (int16_t)value;
+                if (signed_value < -2)
+                    return preflight_error(vm,
+                                           "unsupported set_true_colour foreground value");
+            }
+            if (constant_operand(instruction, 1U, &value)) {
+                signed_value = (int16_t)value;
+                if (signed_value < -2)
+                    return preflight_error(vm,
+                                           "unsupported set_true_colour background value");
+            }
+            break;
+
+        default:
+            break;
+        }
+        return TCL_OK;
+    }
+
+    if (instruction->form != ZM_FORM_VARIABLE ||
+        instruction->operand_count != ZM_OPERANDS_VAR)
+        return TCL_OK;
+
+    switch (instruction->opcode_number) {
+    case 11U: /* set_window: supported V3-5/V7/V8 screen model has two windows */
+        if (constant_operand(instruction, 0U, &value) && value > 1U)
+            return preflight_error(vm, "unsupported Z-machine window number");
+        break;
+
+    case 19U: /* output_stream */
+        if (constant_operand(instruction, 0U, &value)) {
+            signed_value = (int16_t)value;
+            if (signed_value < -4 || signed_value > 4)
+                return preflight_error(vm,
+                                       "unsupported Z-machine output stream number");
+            if (signed_value == 3 && instruction->operand_count_actual < 2U)
+                return preflight_error(vm,
+                                       "output_stream 3 requires a table operand");
+        }
+        break;
+
+    case 20U: /* input_stream */
+        if (constant_operand(instruction, 0U, &value) && value > 1U)
+            return preflight_error(vm, "invalid Z-machine input stream");
+        break;
+
+    case 21U: /* sound_effect */
+        if (instruction->operand_count_actual > 1U &&
+            constant_operand(instruction, 0U, &value) && value < 3U)
+            return preflight_error(vm,
+                "sound_effect numbers below 3 cannot have additional operands");
+        if (instruction->operand_count_actual > 1U &&
+            constant_operand(instruction, 1U, &value) &&
+            (value < 1U || value > 4U))
+            return preflight_error(vm, "invalid sound_effect effect value");
+        if (vm->version == 3U && instruction->operand_count_actual > 2U &&
+            constant_operand(instruction, 2U, &value) && (value & 0xff00U) != 0U)
+            return preflight_error(vm,
+                                   "Version 3 sound_effect does not support repeats");
+        break;
+
+    case 22U: /* read_char */
+        if (constant_operand(instruction, 0U, &value) && value != 1U)
+            return preflight_error(vm, "read_char input device must be 1");
+        if (instruction->operand_count_actual > 1U &&
+            constant_operand(instruction, 1U, &value) && value != 0U)
+            return preflight_error(vm, "timed read_char is not yet supported");
+        if (instruction->operand_count_actual > 2U &&
+            constant_operand(instruction, 2U, &value) && value != 0U)
+            return preflight_error(vm,
+                                   "timed read_char callback is not yet supported");
+        break;
+
+    case 23U: /* scan_table optional form */
+        if (instruction->operand_count_actual == 4U &&
+            constant_operand(instruction, 3U, &value) && (value & 0x7fU) == 0U)
+            return preflight_error(vm, "scan_table field size is zero");
+        break;
+
+    case 27U: /* tokenise */
+        if (constant_operand(instruction, 1U, &value) && value == 0U)
+            return preflight_error(vm,
+                                   "tokenise requires a nonzero parse buffer address");
+        break;
+
+    default:
+        break;
+    }
+
+    return TCL_OK;
+}
+
+/* Return nonzero for an EXT instruction which the Standard says to ignore. */
+static int ignored_extended_opcode(const ZMachine *vm,
+                                   const ZMachineInstruction *instruction)
+{
+    if (!vm || !instruction || instruction->form != ZM_FORM_EXTENDED ||
+        instruction->opcode_number < 29U)
+        return 0;
+
+    if (instruction->opcode_number >= 30U)
+        return 1;
+
+    /* EXT:29 is buffer_screen only in V6. V5/V7/V8 therefore ignore it. */
+    return vm->version != 6U;
+}
+
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
@@ -373,6 +549,13 @@ int zmachine_step(ZMachine *vm)
         return TCL_ERROR;
     if (validate_arity(vm, &instruction) != TCL_OK)
         return TCL_ERROR;
+    if (validate_literal_values(vm, &instruction) != TCL_OK)
+        return TCL_ERROR;
+
+    if (ignored_extended_opcode(vm, &instruction)) {
+        vm->pc = instruction.next_pc;
+        return TCL_OK;
+    }
 
     return zmachine_step_preflight_base(vm);
 }
