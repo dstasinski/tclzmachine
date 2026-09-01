@@ -4,11 +4,12 @@
  * Global instruction-legality preflight for the layered VM dispatcher.
  *
  * Several higher layers own opcodes before execution reaches the original core:
- * external stream selection, lexical operations, numeric input, presentation,
- * and optional mIRC styling. A malformed instruction can contain VARIABLE
- * operands even when its opcode, arity, or literal selector is already known to
- * be invalid. Resolving variable 0 pops the evaluation stack, so all rejection
- * which can be decided from the encoded instruction must happen first.
+ * the cooperative run loop, external stream selection, lexical operations,
+ * numeric input, presentation, and optional mIRC styling. A malformed instruction
+ * can contain VARIABLE operands even when its opcode, arity, or literal selector
+ * is already known to be invalid. Resolving variable 0 pops the evaluation stack,
+ * so every rejection which can be decided from the encoded instruction happens
+ * here before any execution layer is allowed to resolve operands.
  *
  * Versions 7 and 8 are explicitly defined by the Standard as Version-5 machines
  * except for their documented memory/address changes. They therefore use the V5
@@ -16,15 +17,15 @@
  * graphics, and formatted-output forms. Version 6 story files are intentionally
  * unsupported by this text-only runtime.
  *
- * This wrapper is the public zmachine_step() entry point. It decodes once, checks
- * version legality, structural operand counts, and literal value constraints,
- * then delegates the untouched instruction to the former public stream wrapper.
- * EXT:29..255 retain the Standard's special ignore rule; ignored instructions
- * advance over their encoded operands without evaluating them.
+ * Both public zmachine_step() and the cooperative run loop call
+ * zmachine_preflight_instruction(). EXT:29..255 retain the Standard's special
+ * ignore rule; ignored instructions advance over their encoded operands without
+ * evaluating them.
  */
 
 #include "tclzmachine.h"
 #include "zmachine_decode.h"
+#include "zmachine_preflight.h"
 
 #include <stdio.h>
 
@@ -64,6 +65,11 @@ static int constant_operand(const ZMachineInstruction *instruction,
  * V6 has a distinct screen model. Although many opcode-table entries begin at
  * V6, the Standard separately states that V7/V8 are identical to V5 except for
  * memory/address changes. Thus V6-only EXT instructions remain illegal in V7/V8.
+ *
+ * show_status is formally a V3-only opcode, but the Standard specifically asks
+ * later interpreters to accept it as a no-op because one V5 Wishbringer release
+ * contains it accidentally. That compatibility exception is authoritative here:
+ * V1/V2 reject it, V3 executes the status operation, and V4+ may consume it.
  */
 static int validate_version(ZMachine *vm,
                             const ZMachineInstruction *instruction)
@@ -88,6 +94,44 @@ static int validate_version(ZMachine *vm,
             return preflight_error(vm,
                                    "extended opcode is available only in Version 6");
 
+        return TCL_OK;
+    }
+
+    if (instruction->operand_count == ZM_OPERANDS_0OP) {
+        switch (opcode) {
+        case 5U: /* save: old 0OP form becomes illegal at V5 */
+        case 6U: /* restore */
+            if (vm->version >= 5U)
+                return preflight_error(vm,
+                    "0OP save/restore is illegal in Version 5 and later");
+            break;
+
+        case 12U: /* show_status: V3, compatibility no-op in later versions */
+            if (vm->version < 3U)
+                return preflight_error(vm,
+                                       "show_status is unavailable before Version 3");
+            break;
+
+        case 13U: /* verify */
+            if (vm->version < 3U)
+                return preflight_error(vm,
+                                       "verify is unavailable before Version 3");
+            break;
+
+        case 14U:
+            /* In V5+ byte 0xBE is decoded as the EXT prefix, not as 0OP:14. */
+            return preflight_error(vm,
+                                   "extended opcode prefix is illegal before Version 5");
+
+        case 15U: /* piracy */
+            if (vm->version < 5U)
+                return preflight_error(vm,
+                                       "piracy is unavailable before Version 5");
+            break;
+
+        default:
+            break;
+        }
         return TCL_OK;
     }
 
@@ -447,6 +491,15 @@ static int validate_literal_values(ZMachine *vm,
         return TCL_OK;
 
     switch (instruction->opcode_number) {
+    case 4U: /* read/sread/aread: this host does not advertise timed input */
+        if (instruction->operand_count_actual >= 3U &&
+            constant_operand(instruction, 2U, &value) && value != 0U)
+            return preflight_error(vm, "timed line input is unsupported");
+        if (instruction->operand_count_actual >= 4U &&
+            constant_operand(instruction, 3U, &value) && value != 0U)
+            return preflight_error(vm, "timed line input routine is unsupported");
+        break;
+
     case 11U: /* set_window: supported V3-5/V7/V8 screen model has two windows */
         if (constant_operand(instruction, 0U, &value) && value > 1U)
             return preflight_error(vm, "unsupported Z-machine window number");
@@ -530,10 +583,34 @@ static int ignored_extended_opcode(const ZMachine *vm,
     return vm->version != 6U;
 }
 
+int zmachine_preflight_instruction(ZMachine *vm,
+                                   const ZMachineInstruction *instruction,
+                                   int *ignored)
+{
+    if (ignored)
+        *ignored = 0;
+
+    if (!vm || !instruction)
+        return preflight_error(vm, "invalid decoded opcode preflight request");
+
+    if (validate_version(vm, instruction) != TCL_OK)
+        return TCL_ERROR;
+    if (validate_arity(vm, instruction) != TCL_OK)
+        return TCL_ERROR;
+    if (validate_literal_values(vm, instruction) != TCL_OK)
+        return TCL_ERROR;
+
+    if (ignored && ignored_extended_opcode(vm, instruction))
+        *ignored = 1;
+
+    return TCL_OK;
+}
+
 int zmachine_step(ZMachine *vm)
 {
     ZMachineInstruction instruction;
     char decode_error[128];
+    int ignored = 0;
 
     if (!vm || !vm->memory)
         return preflight_error(vm, "cannot execute without a loaded story");
@@ -545,14 +622,10 @@ int zmachine_step(ZMachine *vm)
                                "unable to decode Z-machine instruction");
     }
 
-    if (validate_version(vm, &instruction) != TCL_OK)
-        return TCL_ERROR;
-    if (validate_arity(vm, &instruction) != TCL_OK)
-        return TCL_ERROR;
-    if (validate_literal_values(vm, &instruction) != TCL_OK)
+    if (zmachine_preflight_instruction(vm, &instruction, &ignored) != TCL_OK)
         return TCL_ERROR;
 
-    if (ignored_extended_opcode(vm, &instruction)) {
+    if (ignored) {
         vm->pc = instruction.next_pc;
         return TCL_OK;
     }
