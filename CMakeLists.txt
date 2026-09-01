@@ -221,6 +221,11 @@ if(TCLZMACHINE_BUILD_TESTS)
     target_link_libraries(stream-io-test PRIVATE ${TCL_LIBRARY})
     add_test(NAME external-stream-io COMMAND stream-io-test)
 
+    add_executable(stream-reset-test tests/stream_reset.c ${TCLZMACHINE_VM_SOURCES})
+    target_include_directories(stream-reset-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
+    target_link_libraries(stream-reset-test PRIVATE ${TCL_LIBRARY})
+    add_test(NAME stream-reset-synchronization COMMAND stream-reset-test)
+
     add_executable(file-aux-test tests/file_aux.c ${TCLZMACHINE_VM_SOURCES})
     target_include_directories(file-aux-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${TCL_INCLUDE_PATH})
     target_link_libraries(file-aux-test PRIVATE ${TCL_LIBRARY})
