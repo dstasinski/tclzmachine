@@ -1,25 +1,29 @@
 /*
  * zmachine.c
  *
- * Story loading, per-session lifetime management, the cooperative execution
- * loop, and a small set of interpreter-level opcodes which are best handled
- * outside the ordinary instruction executor. The run loop stops whenever a
- * story asks for line input so Tcl/IRC code never blocks on a terminal.
+ * Core session lifetime, story-image loading/reset, packed-address helpers, and
+ * canonical output buffering for tclzmachine.
+ *
+ * This module deliberately contains no opcode-dispatch loop. Cooperative
+ * execution lives in zmachine_run.c, while instruction semantics are layered
+ * through preflight, stream/file, lexical/input, presentation, and core
+ * executors. Keeping lifetime and story-image ownership here prevents a second
+ * copy of opcode behavior from drifting away from the authoritative run path.
+ *
+ * The canonical output buffer is presentation-neutral UTF-8. Output stream 3
+ * is handled here because it changes the destination of text bytes into story
+ * memory; optional mIRC decoration and host word wrapping remain above this
+ * module and never alter canonical VM state.
  */
 
 #include "tclzmachine.h"
-#include "zmachine_decode.h"
-#include "zmachine_exec.h"
-#include "zmachine_input.h"
 #include "zmachine_undo.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define ZM_HEADER_SIZE 64U
-#define ZM_RUN_STEP_LIMIT 1000000U
 
 /* Read a big-endian 16-bit value from story memory. */
 static uint16_t read_be16(const uint8_t *p)
@@ -54,143 +58,6 @@ static int validate_header_layout(ZMachine *vm)
     return TCL_OK;
 }
 
-/*
- * Decode and apply a Z-machine branch record.
- *
- * Branch data follows the operands (and any store variable) rather than being
- * part of the instruction decoder's operand list. Offsets 0 and 1 are special
- * and mean "return false" and "return true" from the current routine.
- */
-static int apply_branch(ZMachine *vm, uint32_t branch_pc, int condition)
-{
-    uint8_t first;
-    int branch_on_true;
-    int32_t offset;
-    uint32_t after;
-
-    if ((size_t)branch_pc >= vm->memory_size) {
-        set_error(vm, "truncated Z-machine branch");
-        return TCL_ERROR;
-    }
-
-    first = vm->memory[branch_pc];
-    branch_on_true = (first & 0x80U) != 0U;
-
-    if (first & 0x40U) {
-        offset = (int32_t)(first & 0x3fU);
-        after = branch_pc + 1U;
-    } else {
-        uint16_t raw;
-        if ((size_t)branch_pc + 1U >= vm->memory_size) {
-            set_error(vm, "truncated Z-machine branch");
-            return TCL_ERROR;
-        }
-        raw = (uint16_t)(((uint16_t)(first & 0x3fU) << 8) |
-                         vm->memory[branch_pc + 1U]);
-        if (raw & 0x2000U)
-            raw |= 0xc000U;
-        offset = (int16_t)raw;
-        after = branch_pc + 2U;
-    }
-
-    if (!!condition != !!branch_on_true) {
-        vm->pc = after;
-        return TCL_OK;
-    }
-
-    if (offset == 0)
-        return zmachine_return(vm, 0U);
-    if (offset == 1)
-        return zmachine_return(vm, 1U);
-
-    vm->pc = (uint32_t)((int32_t)after + offset - 2);
-    if ((size_t)vm->pc >= vm->memory_size) {
-        set_error(vm, "Z-machine branch target is outside story memory");
-        return TCL_ERROR;
-    }
-    return TCL_OK;
-}
-
-/* Store an opcode result and return the address immediately following it. */
-static int store_result(ZMachine *vm, uint32_t store_pc,
-                        uint16_t value, uint32_t *next_pc)
-{
-    uint8_t variable;
-
-    if ((size_t)store_pc >= vm->memory_size) {
-        set_error(vm, "truncated Z-machine store variable");
-        return TCL_ERROR;
-    }
-    variable = vm->memory[store_pc];
-    if (zmachine_variable_write(vm, variable, 0, value) != TCL_OK)
-        return TCL_ERROR;
-    if (next_pc)
-        *next_pc = store_pc + 1U;
-    return TCL_OK;
-}
-
-/*
- * Compute the story-file checksum used by the verify opcode.
- *
- * `verify` describes the bytes of the loaded story file, not the current state
- * of play. Dynamic memory can change on every turn and interpreter-owned header
- * fields are deliberately rewritten after load/restart/restore, so summing
- * vm->memory directly would make a valid story fail verification after normal
- * execution. Bytes below static memory therefore come from the pristine restart
- * image captured at load time; immutable bytes at and above static memory can be
- * read from the live image. Synthetic/unit-test VMs without a restart image fall
- * back to their live bytes, but normal loaded sessions always have the snapshot.
- */
-static int story_checksum_matches(const ZMachine *vm)
-{
-    size_t end;
-    size_t i;
-    uint32_t sum = 0U;
-
-    if (!vm || !vm->memory || vm->memory_size <= ZM_HEADER_SIZE)
-        return 0;
-
-    end = vm->declared_file_length != 0 ?
-          vm->declared_file_length : vm->memory_size;
-    if (end > vm->memory_size)
-        end = vm->memory_size;
-
-    for (i = ZM_HEADER_SIZE; i < end; ++i) {
-        if (vm->initial_dynamic_memory &&
-            i < vm->initial_dynamic_memory_size)
-            sum += vm->initial_dynamic_memory[i];
-        else
-            sum += vm->memory[i];
-    }
-
-    return (uint16_t)sum == vm->checksum;
-}
-
-/*
- * Simple per-session pseudo-random generator.
- *
- * The Z-machine standard specifies observable seeding and result ranges but
- * deliberately does not mandate a host PRNG algorithm. An LCG is sufficient
- * here, deterministic after a negative seed and independent between sessions.
- */
-static uint16_t random_result(ZMachine *vm, int16_t range)
-{
-    if (range < 0) {
-        uint32_t seed = (uint32_t)(-(int32_t)range);
-        vm->random_state = seed ? seed : 1U;
-        return 0U;
-    }
-
-    if (range == 0) {
-        uint32_t seed = (uint32_t)time(NULL) ^ (uint32_t)(uintptr_t)vm;
-        vm->random_state = seed ? seed : 1U;
-        return 0U;
-    }
-
-    vm->random_state = vm->random_state * 1103515245U + 12345U;
-    return (uint16_t)(1U + (vm->random_state % (uint16_t)range));
-}
-
 /* Allocate a zeroed interpreter object and initialize Tcl-owned strings. */
 ZMachine *zmachine_create(void)
 {
@@ -223,6 +90,11 @@ void zmachine_destroy(ZMachine *vm)
 /*
  * Load a story file, cache the header fields used frequently by the VM, and
  * retain a pristine copy of dynamic memory for restart/save-state work.
+ *
+ * The loader owns the complete mutable story image. The restart snapshot covers
+ * exactly dynamic memory so later restart/verify operations can recover the
+ * original story bytes even after interpreter-owned header fields have changed.
+ * On any validation/allocation failure no partially loaded story is executable.
  */
 int zmachine_load_story(ZMachine *vm, const char *path)
 {
@@ -327,7 +199,11 @@ int zmachine_load_story(ZMachine *vm, const char *path)
     return zmachine_reset(vm);
 }
 
-/* Reset volatile execution state without changing story memory. */
+/*
+ * Reset volatile execution state without changing the currently loaded story
+ * image. A Z-machine restart is different: it first restores original dynamic
+ * memory and is implemented by the authoritative run layer.
+ */
 int zmachine_reset(ZMachine *vm)
 {
     if (!vm || !vm->memory) {
@@ -354,7 +230,13 @@ int zmachine_reset(ZMachine *vm)
     return TCL_OK;
 }
 
-/* Queue a line of player input for the next read instruction. */
+/*
+ * Queue one host line for the next cooperative input request.
+ *
+ * Host-character validation is layered above this base implementation. The
+ * queued Tcl_DString is interpreter-owned and is consumed only after the input
+ * subsystem has successfully committed the story's text/parse buffers.
+ */
 int zmachine_supply_input(ZMachine *vm, const char *line)
 {
     if (!vm || !line)
@@ -368,316 +250,6 @@ int zmachine_supply_input(ZMachine *vm, const char *line)
     if (vm->state == ZM_STATE_WAITING_INPUT)
         vm->state = ZM_STATE_READY;
     return TCL_OK;
-}
-
-/*
- * Handle the line-oriented read opcode at the cooperative run-loop boundary.
- * This is deliberately outside the ordinary executor because an IRC runtime
- * must suspend rather than blocking while waiting for a terminal keyboard.
- *
- * V5+ permits the parse buffer to be zero, which suppresses lexical analysis.
- * Some Infocom code encodes that case by omitting the trailing parse operand
- * entirely. For compatibility, a one-operand V5+ read is treated exactly as
- * though an explicit zero parse-buffer operand had been supplied.
- */
-static int handle_read_opcode(ZMachine *vm, int *handled)
-{
-    ZMachineInstruction instruction;
-    uint16_t values[ZM_MAX_OPERANDS];
-    uint16_t text_buffer;
-    uint16_t parse_buffer;
-    uint16_t terminator = 13U;
-    char decode_error[128];
-    uint32_t next_pc;
-
-    *handled = 0;
-    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
-                                     vm->pc, &instruction,
-                                     decode_error, sizeof(decode_error))) {
-        set_error(vm, decode_error[0] ? decode_error :
-                  "unable to decode Z-machine instruction");
-        return TCL_ERROR;
-    }
-
-    if (instruction.operand_count != ZM_OPERANDS_VAR ||
-        instruction.opcode_number != 4U)
-        return TCL_OK;
-
-    *handled = 1;
-    if (!vm->input_available) {
-        vm->state = ZM_STATE_WAITING_INPUT;
-        return TCL_OK;
-    }
-
-    if (instruction.operand_count_actual < 1U ||
-        (vm->version <= 4U && instruction.operand_count_actual < 2U)) {
-        set_error(vm, "read opcode is missing required buffer operands");
-        return TCL_ERROR;
-    }
-
-    if (zmachine_resolve_operands(vm, &instruction, values,
-                                  ZM_MAX_OPERANDS) != TCL_OK)
-        return TCL_ERROR;
-
-    text_buffer = values[0];
-    parse_buffer = instruction.operand_count_actual >= 2U ? values[1] : 0U;
-
-    if (zmachine_input_read_line(vm, text_buffer, parse_buffer, &terminator) != TCL_OK) {
-        set_error(vm, "unable to store or tokenize line input");
-        return TCL_ERROR;
-    }
-
-    next_pc = instruction.next_pc;
-    if (vm->version >= 5U) {
-        uint8_t store_var;
-        if ((size_t)next_pc >= vm->memory_size) {
-            set_error(vm, "truncated read store variable");
-            return TCL_ERROR;
-        }
-        store_var = vm->memory[next_pc++];
-        if (zmachine_variable_write(vm, store_var, 0, terminator) != TCL_OK)
-            return TCL_ERROR;
-    }
-    vm->pc = next_pc;
-    return TCL_OK;
-}
-
-/*
- * Handle small interpreter-level compatibility opcodes before normal dispatch.
- * These operations either affect the whole VM (restart/verify/random) or are
- * intentionally presentation-neutral in this text-only implementation.
- */
-static int handle_core_opcode(ZMachine *vm, int *handled)
-{
-    ZMachineInstruction instruction;
-    uint16_t values[ZM_MAX_OPERANDS];
-    char decode_error[128];
-
-    *handled = 0;
-    if (!zmachine_decode_instruction(vm->memory, vm->memory_size, vm->version,
-                                     vm->pc, &instruction,
-                                     decode_error, sizeof(decode_error))) {
-        set_error(vm, decode_error[0] ? decode_error :
-                  "unable to decode Z-machine instruction");
-        return TCL_ERROR;
-    }
-
-    if (instruction.operand_count == ZM_OPERANDS_0OP) {
-        switch (instruction.opcode_number) {
-        case 7U: { /* restart */
-            uint16_t preserved_flags2;
-
-            *handled = 1;
-            if (!vm->initial_dynamic_memory ||
-                vm->initial_dynamic_memory_size != vm->static_memory_addr) {
-                set_error(vm, "restart image is unavailable");
-                return TCL_ERROR;
-            }
-
-            preserved_flags2 = read_be16(vm->memory + 0x10U);
-            memcpy(vm->memory, vm->initial_dynamic_memory,
-                   vm->initial_dynamic_memory_size);
-            vm->memory[0x10U] = (uint8_t)(preserved_flags2 >> 8);
-            vm->memory[0x11U] = (uint8_t)preserved_flags2;
-            vm->flags2 = preserved_flags2;
-
-            zmachine_undo_discard(vm);
-            vm->pc = vm->initial_pc;
-            vm->sp = 0U;
-            vm->frame_count = 0U;
-            vm->input_available = 0;
-            vm->random_state = 1U;
-            vm->current_window = 0U;
-            vm->output_stream1_enabled = 1;
-            vm->stream3_depth = 0U;
-            memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
-            Tcl_DStringSetLength(&vm->pending_input, 0);
-            zmachine_refresh_interpreter_header(vm);
-            return TCL_OK;
-        }
-
-        case 9U: /* pop in V1-V4; V5+ uses catch instead. */
-            if (vm->version <= 4U) {
-                uint16_t ignored;
-                *handled = 1;
-                if (zmachine_stack_pop(vm, &ignored) != TCL_OK)
-                    return TCL_ERROR;
-                vm->pc = instruction.next_pc;
-            }
-            return TCL_OK;
-
-        case 12U: /* show_status -- presentation-only in V3. */
-            if (vm->version == 3U) {
-                *handled = 1;
-                vm->pc = instruction.next_pc;
-            }
-            return TCL_OK;
-
-        case 13U: /* verify */
-            *handled = 1;
-            return apply_branch(vm, instruction.next_pc,
-                                story_checksum_matches(vm));
-
-        case 15U: /* piracy -- standard asks interpreters to always branch. */
-            if (vm->version >= 5U) {
-                *handled = 1;
-                return apply_branch(vm, instruction.next_pc, 1);
-            }
-            return TCL_OK;
-
-        default:
-            return TCL_OK;
-        }
-    }
-
-    if (instruction.operand_count != ZM_OPERANDS_VAR)
-        return TCL_OK;
-
-    /*
-     * Only resolve operands for opcodes owned by this handler. Variable
-     * operands can pop stack variable 0, so resolving an unhandled opcode here
-     * and then again in zmachine_step() would corrupt the evaluation stack.
-     */
-    if (instruction.opcode_number != 7U &&
-        instruction.opcode_number != 23U &&
-        instruction.opcode_number != 31U)
-        return TCL_OK;
-
-    if (zmachine_resolve_operands(vm, &instruction, values,
-                                  ZM_MAX_OPERANDS) != TCL_OK)
-        return TCL_ERROR;
-
-    switch (instruction.opcode_number) {
-    case 7U: { /* random range -> result */
-        uint32_t next_pc;
-        if (instruction.operand_count_actual < 1U)
-            return TCL_OK;
-        *handled = 1;
-        if (store_result(vm, instruction.next_pc,
-                         random_result(vm, (int16_t)values[0]),
-                         &next_pc) != TCL_OK)
-            return TCL_ERROR;
-        vm->pc = next_pc;
-        return TCL_OK;
-    }
-
-    case 23U: { /* scan_table x table len [form] -> result ?branch */
-        uint16_t form = instruction.operand_count_actual >= 4U ? values[3] : 0x82U;
-        uint16_t result = 0U;
-        uint16_t i;
-        uint32_t store_pc;
-        uint32_t field_size;
-        int words;
-
-        if (vm->version < 4U || instruction.operand_count_actual < 3U)
-            return TCL_OK;
-        *handled = 1;
-        words = (form & 0x80U) != 0U;
-        field_size = form & 0x7fU;
-        if (field_size == 0U) {
-            set_error(vm, "scan_table field size is zero");
-            return TCL_ERROR;
-        }
-
-        for (i = 0U; i < values[2]; ++i) {
-            uint32_t address = (uint32_t)values[1] + (uint32_t)i * field_size;
-            uint16_t candidate;
-
-            if (words) {
-                if ((size_t)address + 1U >= vm->memory_size) {
-                    set_error(vm, "scan_table reads outside story memory");
-                    return TCL_ERROR;
-                }
-                candidate = read_be16(vm->memory + address);
-            } else {
-                if ((size_t)address >= vm->memory_size) {
-                    set_error(vm, "scan_table reads outside story memory");
-                    return TCL_ERROR;
-                }
-                candidate = vm->memory[address];
-            }
-
-            if (candidate == values[0]) {
-                result = (uint16_t)address;
-                break;
-            }
-        }
-
-        if (store_result(vm, instruction.next_pc, result, &store_pc) != TCL_OK)
-            return TCL_ERROR;
-        return apply_branch(vm, store_pc, result != 0U);
-    }
-
-    case 31U: { /* check_arg_count argument-number ?branch */
-        const ZMachineFrame *frame;
-        uint16_t argument_number;
-        int supplied = 0;
-
-        if (vm->version < 5U || instruction.operand_count_actual < 1U)
-            return TCL_OK;
-        *handled = 1;
-        argument_number = values[0];
-        frame = zmachine_current_frame_const(vm);
-        if (frame && argument_number >= 1U && argument_number <= 7U)
-            supplied = (frame->argument_mask &
-                        (uint8_t)(1U << (argument_number - 1U))) != 0U;
-        return apply_branch(vm, instruction.next_pc, supplied);
-    }
-
-    default:
-        return TCL_OK;
-    }
-}
-
-/*
- * Execute synchronously until the story halts, errors, or requests another
- * line of player input. A generous instruction cap protects host applications
- * from a malformed or deliberately non-yielding story file.
- */
-int zmachine_run(ZMachine *vm)
-{
-    unsigned long steps = 0UL;
-
-    if (!vm || !vm->memory) {
-        if (vm)
-            set_error(vm, "no story is loaded");
-        return TCL_ERROR;
-    }
-    if (vm->state == ZM_STATE_ERROR)
-        return TCL_ERROR;
-    if (vm->state == ZM_STATE_HALTED)
-        return TCL_OK;
-
-    zmachine_output_clear(vm);
-    vm->state = ZM_STATE_READY;
-
-    while (vm->state == ZM_STATE_READY) {
-        int handled;
-
-        if (++steps > ZM_RUN_STEP_LIMIT) {
-            set_error(vm, "Z-machine execution step limit exceeded");
-            return TCL_ERROR;
-        }
-
-        if (handle_read_opcode(vm, &handled) != TCL_OK)
-            return TCL_ERROR;
-        if (vm->state != ZM_STATE_READY)
-            break;
-        if (handled)
-            continue;
-
-        if (handle_core_opcode(vm, &handled) != TCL_OK)
-            return TCL_ERROR;
-        if (vm->state != ZM_STATE_READY)
-            break;
-        if (handled)
-            continue;
-
-        if (zmachine_step(vm) != TCL_OK)
-            return TCL_ERROR;
-    }
-
-    return vm->state == ZM_STATE_ERROR ? TCL_ERROR : TCL_OK;
 }
 
 /* Convert a packed routine address according to the loaded story version. */
