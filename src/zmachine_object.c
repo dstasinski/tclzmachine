@@ -350,7 +350,14 @@ int zmachine_object_find_property(const ZMachine *vm, uint16_t object, uint16_t 
 }
 
 /*
- * Read a 1- or 2-byte property, or its default value when it is absent.
+ * Read a property, or its default value when it is absent.
+ *
+ * Length-one properties return their byte. Length-two properties return their
+ * word. The Standard makes get_prop on a property longer than two bytes illegal
+ * but leaves the result unspecified. Old Inform code can nevertheless issue
+ * such reads, so this text runtime uses the stable compatibility result of the
+ * first word. That choice is confined to reads; put_prop remains strict for
+ * properties longer than two bytes.
  *
  * Object zero has no physical object-table entry, but several old Inform
  * library releases probe properties on a null object. Treat null as an object
@@ -389,7 +396,8 @@ int zmachine_object_get_prop(const ZMachine *vm, uint16_t object, uint16_t prope
         *value = b;
         return TCL_OK;
     }
-    if (info.length == 2U) return read_u16(vm, info.data_address, value);
+    if (info.length >= 2U)
+        return read_u16(vm, info.data_address, value);
     return TCL_ERROR;
 }
 
