@@ -1,8 +1,8 @@
 /*
  * zmachine_object.c
  *
- * Version-aware implementation of the Z-machine object tree and property
- * table model.
+ * Version-aware implementation of the Z-machine object tree and property table
+ * model.
  *
  * The object format changes materially after V3.  V1-V3 object entries are
  * 9 bytes long, provide 32 attributes, and store parent/sibling/child object
@@ -385,11 +385,31 @@ int zmachine_object_put_prop(ZMachine *vm, uint16_t object, uint16_t property, u
     return obj_error(vm, "put_prop requires a one- or two-byte property");
 }
 
-/* Return the first data-byte address for a property, or zero when absent. */
-int zmachine_object_get_prop_addr(const ZMachine *vm, uint16_t object, uint16_t property, uint16_t *address)
+/*
+ * Return the first data-byte address for a property, or zero when absent.
+ *
+ * Object zero is the null object, and property zero cannot occur in an object
+ * property list. Old Inform story code can nevertheless probe either value
+ * through get_prop_addr. Since this opcode's defined "not present" result is
+ * zero, keep that tolerance local to this non-mutating address query rather
+ * than relaxing the rest of the object subsystem.
+ */
+int zmachine_object_get_prop_addr(const ZMachine *vm,
+                                  uint16_t object,
+                                  uint16_t property,
+                                  uint16_t *address)
 {
     ZMachinePropertyInfo info;
-    if (!address || zmachine_object_find_property(vm, object, property, &info) != TCL_OK) return TCL_ERROR;
+
+    if (!vm || !address)
+        return TCL_ERROR;
+    if (object == 0U || property == 0U) {
+        *address = 0U;
+        return TCL_OK;
+    }
+    if (zmachine_object_find_property(vm, object, property, &info) != TCL_OK)
+        return TCL_ERROR;
+
     *address = (uint16_t)(info.number ? info.data_address : 0U);
     return TCL_OK;
 }
