@@ -6,8 +6,10 @@
  * bucket, so they must not be mistaken for VAR:7 random, VAR:23 scan_table, or
  * VAR:31 check_arg_count merely because their low opcode number matches.
  *
- * This suite also verifies that interpreter-owned version/arity checks happen
- * before operand resolution or host suspension, preserving stack variable 0.
+ * The run loop now invokes the same decoded-instruction preflight as the public
+ * step boundary before any owned opcode may resolve operands or suspend for host
+ * input. These tests therefore also exercise that shared authority while checking
+ * that stack variable 0 retains its single-evaluation semantics.
  */
 
 #include "tclzmachine.h"
@@ -92,7 +94,7 @@ int main(void)
         vm.memory[0x20U] = 0xBEU;
         vm.memory[0x21U] = 0x1FU;
         vm.memory[0x22U] = 0xFFU;
-        vm.memory[0x23U] = 0xBAU; /* quit */
+        vm.memory[0x23U] = 0xBAU;
 
         assert(zmachine_run(&vm) == TCL_OK);
         assert(vm.state == ZM_STATE_HALTED);
@@ -134,8 +136,7 @@ int main(void)
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "scan_table") != NULL);
-        assert(strstr(vm.error, "Version 4") != NULL);
+        assert(strstr(vm.error, "VAR opcode requires V4 or later") != NULL);
         assert(vm.sp == 1U && vm.stack[0] == 0xCAFEU);
         free_vm(&vm);
     }
@@ -153,8 +154,7 @@ int main(void)
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "check_arg_count") != NULL);
-        assert(strstr(vm.error, "Version 5") != NULL);
+        assert(strstr(vm.error, "VAR opcode requires V5 or later") != NULL);
         assert(vm.sp == 1U && vm.stack[0] == 0xBEEFU);
         free_vm(&vm);
     }
