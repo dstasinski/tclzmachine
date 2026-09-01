@@ -148,7 +148,7 @@ int main(void)
      * untimed input without changing their encoded instruction length.
      */
     {
-        const uint8_t b[] = {0xf6, 0x53, 0x01, 0x05, 0x01, 0x10};
+        const uint8_t b[] = {0xf6, 0x53, 0x01, 0x05, 0x12, 0x34, 0x10};
         ZMachineInstruction i = decode(b, sizeof(b), 5);
         assert(i.opcode_number == 22);
         assert(i.operand_count_actual == 3);
@@ -157,7 +157,7 @@ int main(void)
         assert(i.operands[1].value == 0);
         assert(i.operands[2].type == ZM_OPERAND_SMALL_CONSTANT);
         assert(i.operands[2].value == 0);
-        assert(i.next_pc == 5);
+        assert(i.next_pc == 6);
     }
 
     /* The same fallback applies to V4+ read time/routine operands. */
