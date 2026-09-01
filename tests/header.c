@@ -74,8 +74,10 @@ int main(void)
         vm.memory[0x01U] = 0xffU;
         write_word(&vm, 0x10U, 0xffffU);
         vm.header_extension_addr = 0x200U;
-        write_word(&vm, 0x200U, 4U);
+        write_word(&vm, 0x200U, 6U);
         write_word(&vm, 0x208U, 0xffffU); /* Flags 3 */
+        write_word(&vm, 0x20aU, 0x1234U); /* stale true foreground */
+        write_word(&vm, 0x20cU, 0x5678U); /* stale true background */
 
         zmachine_refresh_interpreter_header(&vm);
 
@@ -103,7 +105,30 @@ int main(void)
         assert(vm.memory[0x26U] == 1U && vm.memory[0x27U] == 1U);
         assert(vm.memory[0x2cU] == 2U && vm.memory[0x2dU] == 9U);
         assert(vm.memory[0x32U] == 0U && vm.memory[0x33U] == 0U);
+
+        /* Standard 1.1 header-extension reset fields are normalized too. */
         assert(read_word(&vm, 0x208U) == 0U);
+        assert(read_word(&vm, 0x20aU) == 0x7fffU); /* true white foreground */
+        assert(read_word(&vm, 0x20cU) == 0x0000U); /* true black background */
+        free_vm(&vm);
+    }
+
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 5U);
+        vm.header_extension_addr = 0x200U;
+        write_word(&vm, 0x200U, 4U);      /* Flags 3 is the last declared word. */
+        write_word(&vm, 0x208U, 0xffffU); /* Flags 3 */
+        write_word(&vm, 0x20aU, 0x1234U); /* physically present, not declared */
+        write_word(&vm, 0x20cU, 0x5678U);
+
+        zmachine_refresh_interpreter_header(&vm);
+
+        assert(read_word(&vm, 0x208U) == 0U);
+        /* Interpreter writes beyond the declared extension length do nothing. */
+        assert(read_word(&vm, 0x20aU) == 0x1234U);
+        assert(read_word(&vm, 0x20cU) == 0x5678U);
         free_vm(&vm);
     }
 
