@@ -10,6 +10,12 @@
  * operand bucket, but they are not VAR-table opcodes. Every VAR opcode handled
  * here therefore requires ZM_FORM_VARIABLE as well as the opcode number.
  *
+ * The run loop decodes before it can decide whether an instruction may suspend.
+ * That means its owned opcodes would otherwise bypass the public step boundary.
+ * Every decoded instruction is therefore passed through the same shared
+ * zmachine_preflight_instruction() routine used by zmachine_step() before any
+ * run-layer operand is resolved or any host wait is entered.
+ *
  * The original run-loop implementation remains in zmachine.c under the renamed
  * symbol zmachine_run_legacy for now; story loading, lifetime management, and
  * output buffering still live there. This module is the public run path and is
@@ -21,6 +27,7 @@
 #include "zmachine_decode.h"
 #include "zmachine_exec.h"
 #include "zmachine_input.h"
+#include "zmachine_preflight.h"
 #include "zmachine_stream.h"
 #include "zmachine_undo.h"
 
@@ -46,24 +53,6 @@ static int run_error(ZMachine *vm, const char *message)
 static uint16_t read_be16(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-
-/* Inspect a literal operand without resolving VARIABLE operands. */
-static int constant_operand(const ZMachineInstruction *instruction,
-                            uint8_t index,
-                            uint16_t *value)
-{
-    const ZMachineDecodedOperand *operand;
-
-    if (!instruction || index >= instruction->operand_count_actual)
-        return 0;
-    operand = &instruction->operands[index];
-    if (operand->type != ZM_OPERAND_SMALL_CONSTANT &&
-        operand->type != ZM_OPERAND_LARGE_CONSTANT)
-        return 0;
-    if (value)
-        *value = operand->value;
-    return 1;
 }
 
 /* Store an opcode result and return the address immediately following it. */
@@ -190,16 +179,15 @@ static uint16_t random_result(ZMachine *vm, int16_t range)
 /*
  * Handle VAR:4 read/sread/aread at the cooperative host boundary.
  *
- * Structural validation happens before suspension, but operands are not
- * evaluated until input is actually available. V1-V3 require text+parse; V4
- * adds the optional timed pair. V5/V7/V8 use the V5 form. This project retains
- * its established compatibility exception allowing a V5-compatible story to
- * omit parse entirely, treating that exactly like parse address zero.
+ * Version and encoded-arity legality has already passed the shared preflight.
+ * Operands are deliberately not evaluated until input is actually available.
+ * This prevents a variable-0 text/parse/timed operand from popping merely because
+ * the interpreter has to suspend. Once input exists, all operands are resolved
+ * exactly once in their encoded order.
  *
- * Literal nonzero timed operands are rejected before suspension because this
- * host advertises no timed-input capability. VARIABLE timed operands are not
- * inspected early: evaluating one may pop stack variable 0, so they are resolved
- * exactly once only after host input is actually available.
+ * This host does not advertise timed input. Literal nonzero timed operands are
+ * rejected by the shared preflight before suspension; VARIABLE timed operands
+ * can only be checked after their legitimate single evaluation here.
  */
 static int handle_read(ZMachine *vm,
                        const ZMachineInstruction *instruction,
@@ -209,7 +197,6 @@ static int handle_read(ZMachine *vm,
     uint16_t text_buffer;
     uint16_t parse_buffer;
     uint16_t terminator = 13U;
-    uint16_t literal;
     uint32_t next_pc;
     uint8_t count;
 
@@ -222,22 +209,6 @@ static int handle_read(ZMachine *vm,
 
     *handled = 1;
     count = instruction->operand_count_actual;
-    if (vm->version <= 3U) {
-        if (count != 2U)
-            return run_error(vm, "V1-V3 read requires exactly two operands");
-    } else if (vm->version == 4U) {
-        if (count < 2U || count > 4U)
-            return run_error(vm, "V4 read requires two to four operands");
-    } else if (count < 1U || count > 4U) {
-        return run_error(vm, "V5-compatible read requires one to four operands");
-    }
-
-    if (count >= 3U &&
-        constant_operand(instruction, 2U, &literal) && literal != 0U)
-        return run_error(vm, "timed line input is unsupported");
-    if (count >= 4U &&
-        constant_operand(instruction, 3U, &literal) && literal != 0U)
-        return run_error(vm, "timed line input routine is unsupported");
 
     if (!vm->input_available) {
         vm->state = ZM_STATE_WAITING_INPUT;
@@ -328,18 +299,13 @@ static int execute_restart(ZMachine *vm)
 }
 
 /*
- * Execute interpreter-level 0OP and VAR-table operations.
+ * Execute interpreter-level 0OP and VAR-table operations after shared preflight.
  *
- * Only the VAR form is accepted for random/scan_table/check_arg_count. That
- * guard is the central reason this module exists: an EXT opcode with the same
- * low opcode number must continue down to the extended/presentation/core layers
- * rather than being consumed here accidentally.
- *
- * Version and arity checks for owned VAR opcodes deliberately precede operand
- * resolution. An instruction which is illegal for the story version must not
- * acquire operand side effects before it is rejected; in particular, resolving
- * variable 0 pops the evaluation stack. Once an opcode is known to be legal and
- * structurally complete, its operands are resolved exactly once.
+ * Only the VAR physical form is accepted for random/scan_table/check_arg_count.
+ * That guard remains a dispatch requirement rather than a legality check because
+ * EXTENDED instructions share the decoder's VAR-sized operand bucket. Encoded
+ * version and arity legality is centralized above this layer; runtime semantic
+ * checks which depend on evaluated values remain here.
  */
 static int handle_interpreter_opcode(ZMachine *vm,
                                      const ZMachineInstruction *instruction,
@@ -357,34 +323,35 @@ static int handle_interpreter_opcode(ZMachine *vm,
             *handled = 1;
             return execute_restart(vm);
 
-        case 9U: /* pop in V1-V4; V5+ catch is handled in the core layer. */
+        case 9U: /* pop in V1-V4; V5+ catch is handled in the core-extra layer. */
             if (vm->version <= 4U) {
-                uint16_t ignored;
+                uint16_t discarded;
                 *handled = 1;
-                if (zmachine_stack_pop(vm, &ignored) != TCL_OK)
+                if (zmachine_stack_pop(vm, &discarded) != TCL_OK)
                     return TCL_ERROR;
                 vm->pc = instruction->next_pc;
             }
             return TCL_OK;
 
-        case 12U: /* show_status: real V3 status update, compatibility nop later. */
-            if (vm->version >= 3U) {
-                *handled = 1;
-                vm->pc = instruction->next_pc;
-            }
+        case 12U:
+            /*
+             * show_status is formally V3. The Standard specifically recommends
+             * accepting it as a no-op in later versions because one V5
+             * Wishbringer release contains it accidentally. This text-only host
+             * has no status-line rendering, so V3 and the compatibility forms
+             * share the same consumed/no-visible-effect behavior.
+             */
+            *handled = 1;
+            vm->pc = instruction->next_pc;
             return TCL_OK;
 
-        case 13U: /* verify is introduced in Version 3. */
+        case 13U: /* verify */
             *handled = 1;
-            if (vm->version < 3U)
-                return run_error(vm, "verify is unavailable before Version 3");
             return apply_branch(vm, instruction->next_pc,
                                 story_checksum_matches(vm));
 
-        case 15U: /* piracy is introduced in Version 5. */
+        case 15U: /* piracy: this interpreter always reports genuine. */
             *handled = 1;
-            if (vm->version < 5U)
-                return run_error(vm, "piracy is unavailable before Version 5");
             return apply_branch(vm, instruction->next_pc, 1);
 
         default:
@@ -401,40 +368,13 @@ static int handle_interpreter_opcode(ZMachine *vm,
         instruction->opcode_number != 31U)
         return TCL_OK;
 
-    switch (instruction->opcode_number) {
-    case 7U: /* random range -> result */
-        *handled = 1;
-        if (instruction->operand_count_actual != 1U)
-            return run_error(vm, "random requires exactly one range operand");
-        break;
-
-    case 23U: /* scan_table x table len [form] -> result ?branch */
-        *handled = 1;
-        if (vm->version < 4U)
-            return run_error(vm, "scan_table is unavailable before Version 4");
-        if (instruction->operand_count_actual < 3U ||
-            instruction->operand_count_actual > 4U)
-            return run_error(vm, "scan_table requires three or four operands");
-        break;
-
-    case 31U: /* check_arg_count argument-number ?branch */
-        *handled = 1;
-        if (vm->version < 5U)
-            return run_error(vm, "check_arg_count is unavailable before Version 5");
-        if (instruction->operand_count_actual != 1U)
-            return run_error(vm, "check_arg_count requires exactly one argument number");
-        break;
-
-    default:
-        return TCL_OK;
-    }
-
+    *handled = 1;
     if (zmachine_resolve_operands(vm, instruction, values,
                                   ZM_MAX_OPERANDS) != TCL_OK)
         return TCL_ERROR;
 
     switch (instruction->opcode_number) {
-    case 7U: {
+    case 7U: { /* random range -> result */
         uint32_t next_pc;
 
         if (store_result(vm, instruction->next_pc,
@@ -445,7 +385,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
         return TCL_OK;
     }
 
-    case 23U: {
+    case 23U: { /* scan_table x table len [form] -> result ?branch */
         uint16_t form;
         uint16_t result = 0U;
         uint16_t i;
@@ -486,7 +426,7 @@ static int handle_interpreter_opcode(ZMachine *vm,
         return apply_branch(vm, branch_pc, result != 0U);
     }
 
-    case 31U: {
+    case 31U: { /* check_arg_count argument-number ?branch */
         const ZMachineFrame *frame;
         uint16_t argument_number;
         int supplied = 0;
@@ -523,6 +463,7 @@ int zmachine_run(ZMachine *vm)
         ZMachineInstruction instruction;
         char decode_error[128];
         int handled;
+        int ignored = 0;
 
         if (++steps > ZM_RUN_STEP_LIMIT)
             return run_error(vm, "Z-machine execution step limit exceeded");
@@ -534,6 +475,13 @@ int zmachine_run(ZMachine *vm)
                                          sizeof(decode_error))) {
             return run_error(vm, decode_error[0] ? decode_error :
                              "unable to decode Z-machine instruction");
+        }
+
+        if (zmachine_preflight_instruction(vm, &instruction, &ignored) != TCL_OK)
+            return TCL_ERROR;
+        if (ignored) {
+            vm->pc = instruction.next_pc;
+            continue;
         }
 
         if (handle_read(vm, &instruction, &handled) != TCL_OK)
@@ -550,6 +498,7 @@ int zmachine_run(ZMachine *vm)
         if (handled)
             continue;
 
+        /* Ordinary instructions re-enter the same authoritative preflight. */
         if (zmachine_step(vm) != TCL_OK)
             return TCL_ERROR;
     }
