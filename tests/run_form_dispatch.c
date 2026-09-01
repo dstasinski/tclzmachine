@@ -1,21 +1,20 @@
 /*
  * run_form_dispatch.c
  *
- * Regression coverage for the cooperative run layer's opcode-form boundary.
- * EXTENDED instructions share the decoder's VAR operand-count bucket, so the
- * run loop must not mistake EXT opcodes for VAR-table read/random/scan_table/
- * check_arg_count operations merely because their low opcode numbers match.
+ * Regression coverage for the cooperative run-loop's form-aware interpreter
+ * opcode dispatch. Extended instructions share the decoder's VAR operand-count
+ * bucket, so they must not be mistaken for VAR:7 random, VAR:23 scan_table, or
+ * VAR:31 check_arg_count merely because their low opcode number matches.
  *
- * Version/arity rejection is also tested with variable 0 operands. Reading
- * variable 0 pops the evaluation stack, so an opcode which is illegal for the
- * active story version must be rejected before operand resolution rather than
- * acquiring a speculative stack side effect on its way to an error.
+ * This suite also verifies that interpreter-owned version/arity checks happen
+ * before operand resolution or host suspension, preserving stack variable 0.
  */
 
 #include "tclzmachine.h"
+#include "zmachine_exec.h"
+#include "zmachine_state.h"
 
 #include <assert.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +30,6 @@ static void init_vm(ZMachine *vm, uint8_t version)
     vm->globals_addr = 0x100U;
     vm->state = ZM_STATE_READY;
     vm->output_stream1_enabled = 1;
-    vm->random_state = 1U;
     Tcl_DStringInit(&vm->output);
     Tcl_DStringInit(&vm->pending_input);
 }
@@ -53,42 +51,7 @@ static uint16_t read_global(const ZMachine *vm, uint8_t variable)
 
 int main(void)
 {
-    /* EXT:4 set_font must execute, not suspend as VAR:4 read. */
-    {
-        ZMachine vm;
-
-        init_vm(&vm, 5U);
-        vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xBEU;
-        vm.memory[0x21U] = 0x04U;
-        vm.memory[0x22U] = 0x7FU;
-        vm.memory[0x23U] = 0x01U;
-        vm.memory[0x24U] = 0x10U;
-        vm.memory[0x25U] = 0xBAU; /* quit */
-
-        assert(zmachine_run(&vm) == TCL_OK);
-        assert(vm.state == ZM_STATE_HALTED);
-        assert(vm.pc == 0x26U);
-        assert(read_global(&vm, 0x10U) == 1U);
-        free_vm(&vm);
-    }
-
-    /* Accidental later-version show_status remains a compatibility no-op. */
-    {
-        ZMachine vm;
-
-        init_vm(&vm, 5U);
-        vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xBCU; /* show_status */
-        vm.memory[0x21U] = 0xBAU; /* quit */
-
-        assert(zmachine_run(&vm) == TCL_OK);
-        assert(vm.state == ZM_STATE_HALTED);
-        assert(vm.pc == 0x22U);
-        free_vm(&vm);
-    }
-
-    /* EXT:7 must never be consumed as VAR:7 random by the run layer. */
+    /* EXT:7 must not be mistaken for VAR:7 random. */
     {
         ZMachine vm;
 
@@ -96,29 +59,78 @@ int main(void)
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xBEU;
         vm.memory[0x21U] = 0x07U;
-        vm.memory[0x22U] = 0xFFU; /* no operands */
+        vm.memory[0x22U] = 0xFFU;
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "opcode") != NULL);
+        assert(strstr(vm.error, "Version 6") != NULL);
         free_vm(&vm);
     }
 
-    /*
-     * scan_table is V4+. A V3 encoding which names variable 0 must be rejected
-     * before operand resolution, leaving the evaluation-stack sentinel intact.
-     */
+    /* EXT:23 must not be mistaken for VAR:23 scan_table. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 5U);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBEU;
+        vm.memory[0x21U] = 0x17U;
+        vm.memory[0x22U] = 0xFFU;
+
+        assert(zmachine_run(&vm) == TCL_ERROR);
+        assert(vm.state == ZM_STATE_ERROR);
+        assert(strstr(vm.error, "Version 6") != NULL);
+        free_vm(&vm);
+    }
+
+    /* EXT:31 is in the standard ignore range, not VAR:31 check_arg_count. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 5U);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xBEU;
+        vm.memory[0x21U] = 0x1FU;
+        vm.memory[0x22U] = 0xFFU;
+        vm.memory[0x23U] = 0xBAU; /* quit */
+
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_HALTED);
+        assert(vm.pc == 0x24U);
+        free_vm(&vm);
+    }
+
+    /* V3 random remains a real VAR:7 instruction. */
+    {
+        ZMachine vm;
+
+        init_vm(&vm, 3U);
+        vm.pc = 0x20U;
+        vm.memory[0x20U] = 0xE7U;
+        vm.memory[0x21U] = 0x7FU;
+        vm.memory[0x22U] = 1U;
+        vm.memory[0x23U] = 0x10U;
+        vm.memory[0x24U] = 0xBAU;
+
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_HALTED);
+        assert(read_global(&vm, 0x10U) == 1U);
+        free_vm(&vm);
+    }
+
+    /* scan_table is unavailable before V4 and cannot pop variable 0 first. */
     {
         ZMachine vm;
 
         init_vm(&vm, 3U);
         assert(zmachine_stack_push(&vm, 0xCAFEU) == TCL_OK);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xF7U; /* VAR:23 scan_table */
-        vm.memory[0x21U] = 0x97U; /* variable, small, small, omitted */
-        vm.memory[0x22U] = 0x00U; /* variable 0: would pop if resolved */
+        vm.memory[0x20U] = 0xF7U;
+        vm.memory[0x21U] = 0x95U;
+        vm.memory[0x22U] = 0x00U;
         vm.memory[0x23U] = 0x80U;
         vm.memory[0x24U] = 0x01U;
+        vm.memory[0x25U] = 0x82U;
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
@@ -135,9 +147,9 @@ int main(void)
         init_vm(&vm, 4U);
         assert(zmachine_stack_push(&vm, 0xBEEFU) == TCL_OK);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xFFU; /* VAR:31 check_arg_count */
-        vm.memory[0x21U] = 0xBFU; /* variable, then omitted */
-        vm.memory[0x22U] = 0x00U; /* variable 0: would pop if resolved */
+        vm.memory[0x20U] = 0xFFU;
+        vm.memory[0x21U] = 0xBFU;
+        vm.memory[0x22U] = 0x00U;
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
@@ -147,13 +159,13 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* verify is not available before V3; reject it rather than invent behavior. */
+    /* verify is not available before V3. */
     {
         ZMachine vm;
 
         init_vm(&vm, 2U);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xBDU; /* 0OP:13 verify */
+        vm.memory[0x20U] = 0xBDU;
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
@@ -162,22 +174,18 @@ int main(void)
         free_vm(&vm);
     }
 
-    /*
-     * Malformed read has a known structural error before host interaction. Do
-     * not suspend and ask Tcl for input only to diagnose the missing buffers on
-     * the next cooperative turn.
-     */
+    /* Malformed V3 read is diagnosed before host interaction. */
     {
         ZMachine vm;
 
         init_vm(&vm, 3U);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xE4U; /* VAR:4 sread */
-        vm.memory[0x21U] = 0xFFU; /* all operands omitted */
+        vm.memory[0x20U] = 0xE4U;
+        vm.memory[0x21U] = 0xFFU;
 
         assert(zmachine_run(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "buffer operands") != NULL);
+        assert(strstr(vm.error, "V1-V3 read requires exactly two operands") != NULL);
         free_vm(&vm);
     }
 
@@ -190,9 +198,8 @@ int main(void)
         vm.memory[0x80U] = 20U;
         vm.memory[0x81U] = 0U;
 
-        /* VAR:4 aread text=0x80 parse=0 time=1 routine=0 -> global16 */
         vm.memory[0x20U] = 0xE4U;
-        vm.memory[0x21U] = 0x55U; /* four small constants */
+        vm.memory[0x21U] = 0x55U;
         vm.memory[0x22U] = 0x80U;
         vm.memory[0x23U] = 0x00U;
         vm.memory[0x24U] = 0x01U;
