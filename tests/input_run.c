@@ -5,8 +5,8 @@
  *
  * Coverage includes normal V5 text+parse input, the established one-operand V5
  * compatibility form, version-specific structural validation before suspension,
- * immediate rejection of literal timed-input requests this host cannot support,
- * and V5+ terminating-character handling through the public key API.
+ * untimed fallback for stories which request unavailable timed input, and V5+
+ * terminating-character handling through the public key API.
  */
 
 #include "tclzmachine.h"
@@ -203,7 +203,11 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* Literal nonzero timed input is unsupported and must not suspend first. */
+    /*
+     * The host advertises timed input as unavailable. If an older V4+ story
+     * nevertheless supplies a nonzero timer, degrade to an ordinary untimed
+     * request rather than aborting; the VM should suspend at the read PC.
+     */
     {
         ZMachine vm;
         init_vm(&vm);
@@ -213,10 +217,21 @@ int main(void)
         put16(vm.memory, 0x24U, 0x00A0U);
         vm.memory[0x26U] = 1U;
         vm.memory[0x27U] = 0x10U;
+        vm.memory[0x28U] = 0xBAU;
+        vm.memory[0x80U] = 20U;
+        vm.memory[0xA0U] = 4U;
 
-        assert(zmachine_run(&vm) == TCL_ERROR);
-        assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "timed line input is unsupported") != NULL);
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_WAITING_INPUT);
+        assert(vm.pc == 0x20U);
+
+        assert(zmachine_supply_input(&vm, "LOOK") == TCL_OK);
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_HALTED);
+        assert(vm.pc == 0x29U);
+        assert(vm.memory[0x81U] == 4U);
+        assert(memcmp(vm.memory + 0x82U, "look", 4U) == 0);
+        assert(global16(&vm, 0x10U) == 13U);
 
         free_vm(&vm);
     }
