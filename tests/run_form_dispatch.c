@@ -6,10 +6,11 @@
  * bucket, so they must not be mistaken for VAR:7 random, VAR:23 scan_table, or
  * VAR:31 check_arg_count merely because their low opcode number matches.
  *
- * The run loop now invokes the same decoded-instruction preflight as the public
- * step boundary before any owned opcode may resolve operands or suspend for host
+ * The run loop invokes the same decoded-instruction preflight as the public step
+ * boundary before any owned opcode may resolve operands or suspend for host
  * input. These tests therefore also exercise that shared authority while checking
- * that stack variable 0 retains its single-evaluation semantics.
+ * that stack variable 0 retains its single-evaluation semantics and unavailable
+ * timed line input degrades to ordinary input rather than becoming a VM error.
  */
 
 #include "tclzmachine.h"
@@ -189,7 +190,11 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* Nonzero timed line input is rejected because the capability is not offered. */
+    /*
+     * Timed input is not advertised. A V5 story which nevertheless supplies
+     * time/routine operands is normalized to ordinary line input; with pending
+     * host input already available, it completes normally and reaches quit.
+     */
     {
         ZMachine vm;
 
@@ -205,12 +210,16 @@ int main(void)
         vm.memory[0x24U] = 0x01U;
         vm.memory[0x25U] = 0x00U;
         vm.memory[0x26U] = 0x10U;
+        vm.memory[0x27U] = 0xBAU;
         Tcl_DStringAppend(&vm.pending_input, "look", -1);
         vm.input_available = 1;
 
-        assert(zmachine_run(&vm) == TCL_ERROR);
-        assert(vm.state == ZM_STATE_ERROR);
-        assert(strstr(vm.error, "timed line input") != NULL);
+        assert(zmachine_run(&vm) == TCL_OK);
+        assert(vm.state == ZM_STATE_HALTED);
+        assert(vm.pc == 0x28U);
+        assert(vm.memory[0x81U] == 4U);
+        assert(memcmp(vm.memory + 0x82U, "look", 4U) == 0);
+        assert(read_global(&vm, 0x10U) == 13U);
         free_vm(&vm);
     }
 
