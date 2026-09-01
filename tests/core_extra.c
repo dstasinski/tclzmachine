@@ -3,10 +3,10 @@
  *
  * Regression coverage for core opcodes implemented by the incremental
  * standards-completeness layer: catch/throw, VAR-form not, the two EXT shifts,
- * text-safe buffer_screen behavior, reserved extended-opcode handling, and
- * delegated-core operand validation. Tests execute through the public layered
- * zmachine_step() entry point so decoder form distinctions, validation, operand
- * side effects, and delegation behavior are exercised as well as calculations.
+ * ignored extended-opcode handling, and delegated-core operand validation.
+ * Tests execute through the public layered zmachine_step() entry point so decoder
+ * form distinctions, validation, operand side effects, and delegation behavior
+ * are exercised as well as calculations.
  */
 
 #include "tclzmachine.h"
@@ -61,10 +61,7 @@ static uint16_t read_global(const ZMachine *vm, uint8_t variable)
 
 int main(void)
 {
-    /*
-     * catch returns the number of active routine frames. throw to that cookie
-     * discards newer frames, then returns from the caught routine with value.
-     */
+    /* catch/throw use the active routine-frame count as the standard cookie. */
     {
         ZMachine vm;
         uint16_t frame1_locals[1] = {0x1111U};
@@ -78,7 +75,6 @@ int main(void)
         assert(zmachine_frame_push(&vm, 0x80U, 1U, 0,
                                    frame2_locals, 1U, 0U) == TCL_OK);
 
-        /* 0OP:9 catch -> global 16. */
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xB9U;
         vm.memory[0x21U] = 0x10U;
@@ -87,14 +83,12 @@ int main(void)
         assert(vm.frame_count == 2U);
         assert(read_global(&vm, 0x10U) == 2U);
 
-        /* Create a newer frame and private stack data which throw must discard. */
         assert(zmachine_stack_push(&vm, 0xBBBBU) == TCL_OK);
         assert(zmachine_frame_push(&vm, 0x70U, 1U, 0,
                                    frame3_locals, 1U, 0U) == TCL_OK);
         assert(zmachine_stack_push(&vm, 0xCCCCU) == TCL_OK);
         assert(vm.frame_count == 3U && vm.sp == 3U);
 
-        /* 2OP:28 throw 0x1234 frame-cookie-2. */
         vm.pc = 0x30U;
         vm.memory[0x30U] = 0xDCU;
         vm.memory[0x31U] = 0x0FU;
@@ -104,7 +98,6 @@ int main(void)
         vm.memory[0x35U] = 0x02U;
         assert(zmachine_step(&vm) == TCL_OK);
 
-        /* Frame 3 is discarded and frame 2 returns normally into frame 1. */
         assert(vm.frame_count == 1U);
         assert(vm.pc == 0x80U);
         assert(vm.sp == 1U && vm.stack[0] == 0xAAAAU);
@@ -112,7 +105,7 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* VAR:24 not stores the 16-bit complement in V5+. */
+    /* VAR:24 not stores the 16-bit complement in V5-compatible versions. */
     {
         ZMachine vm;
 
@@ -129,16 +122,12 @@ int main(void)
         free_vm(&vm);
     }
 
-    /*
-     * EXT:2 log_shift zeros incoming right-shift bits; EXT:3 art_shift copies
-     * the sign bit. Positive shifts share ordinary 16-bit left-shift behavior.
-     */
+    /* EXT:2/3 implement logical and arithmetic 16-bit shifts. */
     {
         ZMachine vm;
 
         init_vm(&vm);
 
-        /* log_shift 0x8001 -1 -> 0x4000 */
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xBEU;
         vm.memory[0x21U] = 0x02U;
@@ -152,7 +141,6 @@ int main(void)
         assert(vm.pc == 0x28U);
         assert(read_global(&vm, 0x10U) == 0x4000U);
 
-        /* art_shift 0x8001 -1 -> 0xC000 */
         vm.pc = 0x30U;
         vm.memory[0x30U] = 0xBEU;
         vm.memory[0x31U] = 0x03U;
@@ -166,7 +154,6 @@ int main(void)
         assert(vm.pc == 0x38U);
         assert(read_global(&vm, 0x11U) == 0xC000U);
 
-        /* log_shift 0x8001 +1 wraps in the 16-bit value domain -> 0x0002. */
         vm.pc = 0x40U;
         vm.memory[0x40U] = 0xBEU;
         vm.memory[0x41U] = 0x02U;
@@ -179,7 +166,6 @@ int main(void)
         assert(zmachine_step(&vm) == TCL_OK);
         assert(read_global(&vm, 0x12U) == 0x0002U);
 
-        /* Arithmetic boundary: -32768 >> 15 remains -1. */
         vm.pc = 0x50U;
         vm.memory[0x50U] = 0xBEU;
         vm.memory[0x51U] = 0x03U;
@@ -187,7 +173,7 @@ int main(void)
         vm.memory[0x53U] = 0x80U;
         vm.memory[0x54U] = 0x00U;
         vm.memory[0x55U] = 0xFFU;
-        vm.memory[0x56U] = 0xF1U; /* -15 */
+        vm.memory[0x56U] = 0xF1U;
         vm.memory[0x57U] = 0x13U;
         assert(zmachine_step(&vm) == TCL_OK);
         assert(read_global(&vm, 0x13U) == 0xFFFFU);
@@ -195,11 +181,7 @@ int main(void)
         free_vm(&vm);
     }
 
-    /*
-     * EXT:29 is not defined for V5. The Standard's out-of-range EXT rule says it
-     * is ignored there, so even a variable-0 operand must remain unevaluated and
-     * the byte after the decoded operands is not consumed as a store record.
-     */
+    /* EXT:29 is undefined in V5 and ignored without evaluating variable 0. */
     {
         ZMachine vm;
 
@@ -207,10 +189,10 @@ int main(void)
         assert(zmachine_stack_push(&vm, 1U) == TCL_OK);
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xBEU;
-        vm.memory[0x21U] = 0x1DU; /* EXT:29 */
-        vm.memory[0x22U] = 0xBFU; /* one variable operand */
-        vm.memory[0x23U] = 0x00U; /* variable 0 */
-        vm.memory[0x24U] = 0x10U; /* must remain the next instruction byte */
+        vm.memory[0x21U] = 0x1DU;
+        vm.memory[0x22U] = 0xBFU;
+        vm.memory[0x23U] = 0x00U;
+        vm.memory[0x24U] = 0x10U;
 
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x24U);
@@ -218,7 +200,7 @@ int main(void)
         free_vm(&vm);
     }
 
-    /* Reserved EXT:30+ opcodes are ignored without evaluating their operands. */
+    /* Reserved EXT:30+ opcodes are ignored without evaluating operands. */
     {
         ZMachine vm;
 
@@ -226,9 +208,9 @@ int main(void)
         assert(zmachine_stack_push(&vm, 0xCAFEU) == TCL_OK);
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xBEU;
-        vm.memory[0x21U] = 0x1EU; /* EXT:30 */
-        vm.memory[0x22U] = 0xBFU; /* one variable operand */
-        vm.memory[0x23U] = 0x00U; /* variable 0 */
+        vm.memory[0x21U] = 0x1EU;
+        vm.memory[0x22U] = 0xBFU;
+        vm.memory[0x23U] = 0x00U;
 
         assert(zmachine_step(&vm) == TCL_OK);
         assert(vm.pc == 0x24U);
@@ -237,9 +219,9 @@ int main(void)
     }
 
     /*
-     * V7 inherits V6+ buffer_screen. This text-only runtime ignores buffering
-     * advice and therefore always reports old state 0, but it still evaluates
-     * the real operand and consumes the required store byte.
+     * V7/V8 use the V5 screen model. EXT:29 buffer_screen is therefore not a
+     * real V7 instruction and must follow the same out-of-range ignore rule as
+     * V5, leaving both variable 0 and the following byte untouched.
      */
     {
         ZMachine vm;
@@ -250,15 +232,15 @@ int main(void)
         assert(zmachine_stack_push(&vm, 1U) == TCL_OK);
         vm.pc = 0x20U;
         vm.memory[0x20U] = 0xBEU;
-        vm.memory[0x21U] = 0x1DU; /* EXT:29 buffer_screen */
-        vm.memory[0x22U] = 0xBFU; /* one variable operand */
-        vm.memory[0x23U] = 0x00U; /* mode from variable 0 */
-        vm.memory[0x24U] = 0x10U; /* store global 16 */
+        vm.memory[0x21U] = 0x1DU;
+        vm.memory[0x22U] = 0xBFU;
+        vm.memory[0x23U] = 0x00U;
+        vm.memory[0x24U] = 0x10U;
 
         assert(zmachine_step(&vm) == TCL_OK);
-        assert(vm.pc == 0x25U);
-        assert(vm.sp == 0U);
-        assert(read_global(&vm, 0x10U) == 0U);
+        assert(vm.pc == 0x24U);
+        assert(vm.sp == 1U && vm.stack[0] == 1U);
+        assert(read_global(&vm, 0x10U) == 0x1234U);
         free_vm(&vm);
     }
 
@@ -283,19 +265,14 @@ int main(void)
         free_vm(&vm);
     }
 
-    /*
-     * Variable-form 2OP instructions can be syntactically decoded from a type
-     * byte with too few operands. `je` explicitly forbids a one-operand form;
-     * rejecting it here proves malformed code cannot reach the base executor's
-     * operand array with missing values.
-     */
+    /* `je` explicitly forbids a one-operand variable-form encoding. */
     {
         ZMachine vm;
 
         init_vm(&vm);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xC1U; /* variable-form 2OP:1 je */
-        vm.memory[0x21U] = 0x7FU; /* one small constant, then omitted */
+        vm.memory[0x20U] = 0xC1U;
+        vm.memory[0x21U] = 0x7FU;
         vm.memory[0x22U] = 1U;
         assert(zmachine_step(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
@@ -309,8 +286,8 @@ int main(void)
 
         init_vm(&vm);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xD4U; /* variable-form 2OP:20 add */
-        vm.memory[0x21U] = 0x7FU; /* one small constant only */
+        vm.memory[0x20U] = 0xD4U;
+        vm.memory[0x21U] = 0x7FU;
         vm.memory[0x22U] = 1U;
         assert(zmachine_step(&vm) == TCL_ERROR);
         assert(vm.state == ZM_STATE_ERROR);
@@ -324,8 +301,8 @@ int main(void)
 
         init_vm(&vm);
         vm.pc = 0x20U;
-        vm.memory[0x20U] = 0xE1U; /* VAR:1 storew */
-        vm.memory[0x21U] = 0x5FU; /* two small constants, third omitted */
+        vm.memory[0x20U] = 0xE1U;
+        vm.memory[0x21U] = 0x5FU;
         vm.memory[0x22U] = 0x40U;
         vm.memory[0x23U] = 0x01U;
         assert(zmachine_step(&vm) == TCL_ERROR);
