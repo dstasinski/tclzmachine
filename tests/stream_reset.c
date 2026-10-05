@@ -49,6 +49,7 @@ int main(void)
     vm.state = ZM_STATE_READY;
     vm.output_stream1_enabled = 1;
     Tcl_DStringInit(&vm.output);
+    Tcl_DStringInit(&vm.status_output);
     Tcl_DStringInit(&vm.pending_input);
 
     /* Both transcription and fixed-pitch request begin selected. */
@@ -65,6 +66,7 @@ int main(void)
     free(vm.initial_dynamic_memory);
     free(vm.memory);
     Tcl_DStringFree(&vm.output);
+    Tcl_DStringFree(&vm.status_output);
     Tcl_DStringFree(&vm.pending_input);
 
     puts("stream reset synchronization tests passed");
