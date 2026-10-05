@@ -162,6 +162,8 @@ Important keys include:
 - `streamRequest` — empty, `replay`, `transcript`, or `record`;
 - `commandRecording`;
 - `outputFormat` — `plain` or `mirc`;
+
+`statusText` contains plain text written to nonzero/status windows during the most recent cooperative run. It is intentionally separate from ordinary command output and remains plain even when `-format mirc` is selected.
 - `fileRequest` — empty, `save`, or `restore`;
 - `fileRequestKind` — empty, `full`, or `auxiliary`;
 - `suggestedFileName`, `filePrompt`, `fileTable`, and `fileBytes` for auxiliary file requests;
