@@ -577,7 +577,9 @@ static int cmd_configure(ClientData clientData, Tcl_Interp *interp,
  * selection is waiting for a host path. inputStream reports the currently
  * selected Z-machine input source (0 keyboard/Tcl, 1 replay file).
  * outputFormat is `plain` by default or `mirc` when the host has enabled the
- * optional IRC presentation renderer.
+ * optional IRC presentation renderer. statusText contains text the story wrote
+ * to a nonzero window during the most recent cooperative run; it remains
+ * separate from ordinary command output.
  *
  * fileRequest remains the stable save/restore indicator. fileRequestKind
  * distinguishes full Quetzal state from V5+ auxiliary byte-region transfers.
@@ -647,6 +649,9 @@ static int cmd_info(ClientData clientData, Tcl_Interp *interp,
                    Tcl_NewBooleanObj(zmachine_command_recording_selected(s->vm)));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("outputFormat", -1),
                    Tcl_NewStringObj(session_output_format(s), -1));
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("statusText", -1),
+                   Tcl_NewStringObj(zmachine_status_output_data(s->vm),
+                                    zmachine_status_output_length(s->vm)));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequest", -1),
                    Tcl_NewStringObj(file_request, -1));
     Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("fileRequestKind", -1),
