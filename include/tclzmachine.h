@@ -149,6 +149,14 @@ struct ZMachine {
     uint8_t current_window;
 
     /*
+     * Text emitted to nonzero windows during the current cooperative run.
+     * It is kept separate from canonical narrative output so Tcl/IRC hosts can
+     * expose story-drawn status information without pretending to implement a
+     * complete cursor/window terminal model.
+     */
+    Tcl_DString status_output;
+
+    /*
      * Output-stream state required by VAR:19 output_stream. Stream 1 is the
      * ordinary screen/text stream and is enabled by default after reset. Stream
      * 3 may be nested to the standard maximum depth of 16; each entry stores
@@ -211,6 +219,8 @@ void zmachine_output_clear(ZMachine *vm);
 void zmachine_output_append(ZMachine *vm, const char *text, size_t len);
 const char *zmachine_output_data(const ZMachine *vm);
 int zmachine_output_length(const ZMachine *vm);
+const char *zmachine_status_output_data(const ZMachine *vm);
+int zmachine_status_output_length(const ZMachine *vm);
 
 /* Last interpreter error for this session. */
 const char *zmachine_last_error(const ZMachine *vm);
