@@ -47,12 +47,14 @@ static void init_vm(ZMachine *vm)
     vm->pending_input_terminator = 13U;
     vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
 static void free_vm(ZMachine *vm)
 {
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
     free(vm->memory);
 }
