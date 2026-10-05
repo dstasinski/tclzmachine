@@ -42,6 +42,7 @@ int main(void)
     vm.state = ZM_STATE_READY;
     vm.output_stream1_enabled = 1;
     Tcl_DStringInit(&vm.output);
+    Tcl_DStringInit(&vm.status_output);
     Tcl_DStringInit(&vm.pending_input);
 
     /*
@@ -99,6 +100,7 @@ int main(void)
     zmachine_undo_discard(&vm);
     free(vm.memory);
     Tcl_DStringFree(&vm.output);
+    Tcl_DStringFree(&vm.status_output);
     Tcl_DStringFree(&vm.pending_input);
 
     puts("get_child stack/null operand regression passed");
