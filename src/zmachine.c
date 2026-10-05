@@ -66,6 +66,7 @@ ZMachine *zmachine_create(void)
         return NULL;
 
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
     vm->state = ZM_STATE_READY;
     vm->random_state = 1U;
@@ -83,6 +84,7 @@ void zmachine_destroy(ZMachine *vm)
     free(vm->initial_dynamic_memory);
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
     free(vm);
 }
@@ -225,6 +227,7 @@ int zmachine_reset(ZMachine *vm)
     vm->stream3_depth = 0U;
     memset(vm->stream3_tables, 0, sizeof(vm->stream3_tables));
     Tcl_DStringSetLength(&vm->output, 0);
+    Tcl_DStringSetLength(&vm->status_output, 0);
     Tcl_DStringSetLength(&vm->pending_input, 0);
     zmachine_refresh_interpreter_header(vm);
     return TCL_OK;
@@ -273,8 +276,10 @@ uint32_t zmachine_unpack_string_address(const ZMachine *vm, uint16_t packed)
 /* Clear text accumulated during the current Tcl command. */
 void zmachine_output_clear(ZMachine *vm)
 {
-    if (vm)
+    if (vm) {
         Tcl_DStringSetLength(&vm->output, 0);
+        Tcl_DStringSetLength(&vm->status_output, 0);
+    }
 }
 
 /*
@@ -332,9 +337,11 @@ static int output_stream3_append_byte(ZMachine *vm, uint8_t zscii)
  * text module becomes one '?' in stream 3; print_char and print_unicode use the
  * text module and therefore preserve/reverse-map their proper ZSCII values.
  *
- * When stream 3 is inactive, only stream 1 output for lower window 0 reaches the
- * Tcl-facing canonical buffer. Upper-window/status text is presentation-only in
- * this IRC runtime and is discarded while the story keeps its selected window.
+ * When stream 3 is inactive, stream 1 output for lower window 0 reaches the
+ * Tcl-facing canonical narrative buffer. Text written to a nonzero window is
+ * retained separately in status_output for host inspection. This captures the
+ * story's own status presentation without mixing it into ordinary replies or
+ * claiming cursor/window geometry that the text-only runtime does not emulate.
  */
 void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
 {
@@ -371,8 +378,13 @@ void zmachine_output_append(ZMachine *vm, const char *text, size_t len)
         return;
     }
 
-    if (!vm->output_stream1_enabled || vm->current_window != 0U)
+    if (!vm->output_stream1_enabled)
         return;
+
+    if (vm->current_window != 0U) {
+        Tcl_DStringAppend(&vm->status_output, text, (int)len);
+        return;
+    }
 
     Tcl_DStringAppend(&vm->output, text, (int)len);
 }
@@ -387,6 +399,17 @@ const char *zmachine_output_data(const ZMachine *vm)
 int zmachine_output_length(const ZMachine *vm)
 {
     return vm ? Tcl_DStringLength((Tcl_DString *)&vm->output) : 0;
+}
+
+/* Return nonzero-window text captured during the current cooperative run. */
+const char *zmachine_status_output_data(const ZMachine *vm)
+{
+    return vm ? Tcl_DStringValue((Tcl_DString *)&vm->status_output) : "";
+}
+
+int zmachine_status_output_length(const ZMachine *vm)
+{
+    return vm ? Tcl_DStringLength((Tcl_DString *)&vm->status_output) : 0;
 }
 
 /* Return the last interpreter error, or a fixed message for a null VM. */
