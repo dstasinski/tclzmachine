@@ -27,6 +27,7 @@ static void init_vm(ZMachine *vm, uint8_t version)
     vm->globals_addr = 0x80U;
     vm->state = ZM_STATE_READY;
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
@@ -35,6 +36,7 @@ static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
 }
 
