@@ -29,6 +29,7 @@ static void init_vm(ZMachine *vm)
     vm->output_stream1_enabled = 1;
     vm->pending_file_prompt = -1;
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
@@ -36,6 +37,7 @@ static void free_vm(ZMachine *vm)
 {
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
 }
 
