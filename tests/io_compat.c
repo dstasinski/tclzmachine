@@ -31,6 +31,7 @@ static void init_vm(ZMachine *vm)
     vm->static_memory_addr = 0x180U;
     vm->state = ZM_STATE_READY;
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
@@ -41,6 +42,7 @@ static void free_vm(ZMachine *vm)
     free(vm->memory);
     vm->memory = NULL;
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
 }
 
@@ -92,6 +94,7 @@ int main(void)
         /* Do not call reset on a deliberately errored VM; no stream state exists. */
         free(vm.memory);
         Tcl_DStringFree(&vm.output);
+    Tcl_DStringFree(&vm.status_output);
         Tcl_DStringFree(&vm.pending_input);
     }
 
