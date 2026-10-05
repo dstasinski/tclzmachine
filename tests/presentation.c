@@ -31,6 +31,7 @@ static void init_vm(ZMachine *vm, uint8_t version, size_t size)
     vm->state = ZM_STATE_READY;
     vm->output_stream1_enabled = 1;
     Tcl_DStringInit(&vm->output);
+    Tcl_DStringInit(&vm->status_output);
     Tcl_DStringInit(&vm->pending_input);
 }
 
@@ -39,6 +40,7 @@ static void free_vm(ZMachine *vm)
     zmachine_undo_discard(vm);
     free(vm->memory);
     Tcl_DStringFree(&vm->output);
+    Tcl_DStringFree(&vm->status_output);
     Tcl_DStringFree(&vm->pending_input);
 }
 
@@ -64,9 +66,10 @@ int main(void)
     assert(vm.pc == 0x23U && vm.state == ZM_STATE_READY);
 
     /*
-     * Select the upper window, where canonical IRC output is deliberately
-     * discarded. erase_window -1 must then select window 0 as required by the
-     * Standard; otherwise all later narrative text would remain invisible.
+     * Select the upper window. Its text must be captured separately as status
+     * presentation while remaining absent from canonical narrative output.
+     * erase_window -1 must then select window 0 as required by the Standard;
+     * otherwise all later narrative text would remain invisible.
      */
     vm.memory[0x23] = 0xEBU;
     vm.memory[0x24] = 0x7FU;
@@ -74,8 +77,10 @@ int main(void)
     assert(zmachine_step(&vm) == TCL_OK);
     assert(vm.pc == 0x26U && vm.state == ZM_STATE_READY);
     assert(vm.current_window == 1U);
-    zmachine_output_append(&vm, "hidden", 6U);
+    zmachine_output_append(&vm, "Score: 10  Moves: 4", 19U);
     assert(Tcl_DStringLength(&vm.output) == 0);
+    assert(strcmp(zmachine_status_output_data(&vm), "Score: 10  Moves: 4") == 0);
+    assert(zmachine_status_output_length(&vm) == 19);
 
     vm.memory[0x100] = 0xFFU;
     vm.memory[0x101] = 0xFFU; /* global 16 = -1 */
@@ -88,6 +93,8 @@ int main(void)
     zmachine_output_append(&vm, "V", 1U);
     assert(strcmp(Tcl_DStringValue(&vm.output), "V") == 0);
     Tcl_DStringSetLength(&vm.output, 0);
+    zmachine_output_clear(&vm);
+    assert(zmachine_status_output_length(&vm) == 0);
 
     vm.memory[0x29] = 0xEFU;
     vm.memory[0x2A] = 0x5FU;
